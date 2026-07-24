@@ -60,7 +60,11 @@ class DatasetMetadataLoader:
                 max_end_sec = max(max_end_sec, float(item["end_time_sec"]))
 
             subtitle_payload = load_pickle(subtitle_embedding_dir / f"{video_id}.pkl")
-            subtitle_items = subtitle_payload.get("subtitles", subtitle_payload.get("captions", []))
+            subtitle_items = subtitle_payload.get("subtitles")
+            if subtitle_items is None:
+                subtitle_items = subtitle_payload.get("items")
+            if subtitle_items is None:
+                subtitle_items = subtitle_payload.get("captions", [])
             for subtitle_index, item in enumerate(subtitle_items):
                 subtitle_key = self.make_subtitle_id(video_id, subtitle_index)
                 subtitles[subtitle_key] = SubtitleRecord(
