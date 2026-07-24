@@ -1,0 +1,7 @@
+paddleocr[doc-parser]>=3.0
+rapidfuzz>=3.0
+opencv-python-headless>=4.8
+Pillow>=9.5
+numpy>=1.24
+torch>=2.1
+vietocr>=0.3

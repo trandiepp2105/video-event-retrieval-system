@@ -1,0 +1,11 @@
+torch
+torchvision
+transformers
+accelerate
+safetensors
+qwen-vl-utils
+decord
+opencv-python
+pillow
+numpy
+tqdm
