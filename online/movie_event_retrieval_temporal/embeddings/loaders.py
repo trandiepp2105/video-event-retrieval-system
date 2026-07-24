@@ -14,7 +14,7 @@ class EventEmbeddingLoader:
         item_ids: list[str] = []
         for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
             payload = load_pickle(path)
-            video_id = str(payload["video_id"])
+            video_id = str(payload.get("video_id", path.stem))
             for item in payload["events"]:
                 item_ids.append(DatasetMetadataLoader.make_event_id(video_id, item["event_id"]))
                 vectors.append(np.asarray(item["embedding"], dtype=np.float32))
@@ -27,7 +27,7 @@ class ShotEmbeddingLoader:
         item_ids: list[str] = []
         for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
             payload = load_pickle(path)
-            video_id = str(payload["video_id"])
+            video_id = str(payload.get("video_id", path.stem))
             for item in payload["shots"]:
                 item_ids.append(DatasetMetadataLoader.make_shot_id(video_id, item["shot_id"]))
                 vectors.append(np.asarray(item["embedding"], dtype=np.float32))
@@ -40,7 +40,7 @@ class CaptionEmbeddingLoader:
         item_ids: list[str] = []
         for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
             payload = load_pickle(path)
-            video_id = str(payload["video_id"])
+            video_id = str(payload.get("video_id", path.stem))
             items = payload.get("captions", [])
             embeddings = np.asarray(payload["embeddings"], dtype=np.float32)
             if len(items) != len(embeddings):
@@ -57,7 +57,7 @@ class SubtitleEmbeddingLoader:
         item_ids: list[str] = []
         for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
             payload = load_pickle(path)
-            video_id = str(payload["video_id"])
+            video_id = str(payload.get("video_id", path.stem))
             items = payload.get("subtitles", payload.get("captions", []))
             embeddings = np.asarray(payload["embeddings"], dtype=np.float32)
             if len(items) != len(embeddings):
