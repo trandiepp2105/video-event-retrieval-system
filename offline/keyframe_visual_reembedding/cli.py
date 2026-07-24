@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 import argparse
-import sys
-from pathlib import Path
+from .config import PipelineConfig
+from .pipeline import BatchProcessor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,12 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-
-    module_root = Path(__file__).resolve().parents[3] / "keyframe_siglip2_embedding_module"
-    if str(module_root) not in sys.path:
-        sys.path.insert(0, str(module_root))
-
-    from keyframe_siglip2_embedding import BatchProcessor, PipelineConfig
 
     config = PipelineConfig(
         videos_dir=args.videos_dir,

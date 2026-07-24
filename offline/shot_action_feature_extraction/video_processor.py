@@ -1,0 +1,245 @@
+import gc
+import math
+import pickle
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from torch import nn
+from torch.amp import autocast
+
+from .config import SlowFastShotFeatureConfig
+from .ffmpeg_reader import FFmpegVideoReader
+from .io_utils import ShotLoader
+from .subshot_utils import build_all_subshot_records
+from .transforms import build_batched_video_transform, l2_normalize, temporal_resample_single_video
+
+
+class VideoFeatureProcessor:
+    def __init__(
+        self,
+        config: SlowFastShotFeatureConfig,
+        device: torch.device,
+        model: nn.Module,
+        shot_loader: ShotLoader,
+    ):
+        self.config = config
+        self.device = device
+        self.model = model
+        self.shot_loader = shot_loader
+        self.use_autocast = self.device.type == "cuda"
+        self.transform = build_batched_video_transform(config).to(self.device)
+
+    def _decode_video_tensor(
+        self,
+        video_reader: FFmpegVideoReader,
+        clip_start: float,
+        clip_end: float,
+    ) -> torch.Tensor:
+        return video_reader.get_clip(start_sec=clip_start, end_sec=clip_end)
+
+    def _slice_time_range_from_video_tensor(
+        self,
+        video_tensor: torch.Tensor,
+        video_start: float,
+        video_end: float,
+        range_start: float,
+        range_end: float,
+    ) -> torch.Tensor:
+        total_frames = int(video_tensor.shape[1])
+        if total_frames <= 0:
+            raise RuntimeError("Video tensor khong co frame de cat segment")
+
+        video_duration = max(float(video_end - video_start), 1e-3)
+        rel_start = np.clip((range_start - video_start) / video_duration, 0.0, 1.0)
+        rel_end = np.clip((range_end - video_start) / video_duration, 0.0, 1.0)
+
+        start_index = int(math.floor(rel_start * total_frames))
+        end_index = int(math.ceil(rel_end * total_frames))
+
+        start_index = min(max(start_index, 0), total_frames - 1)
+        end_index = min(max(end_index, start_index + 1), total_frames)
+        return video_tensor[:, start_index:end_index]
+
+    def _transform_video_batch(self, video_batch: torch.Tensor) -> list[torch.Tensor]:
+        with torch.no_grad():
+            return self.transform(video_batch)
+
+    def empty_cuda_cache(self):
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    def _infer_video_batch(self, batch_videos: list[torch.Tensor]) -> list[np.ndarray]:
+        video_batch = None
+        slow_pathway = None
+        fast_pathway = None
+        batch_features = None
+
+        try:
+            video_batch = torch.stack(batch_videos, dim=0).to(self.device, non_blocking=True)
+            slow_pathway, fast_pathway = self._transform_video_batch(video_batch)
+            model_inputs = [slow_pathway, fast_pathway]
+
+            with torch.no_grad():
+                with autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.use_autocast):
+                    batch_features = self.model(model_inputs)
+
+            return [feature for feature in batch_features.detach().cpu().numpy().astype(np.float32)]
+        except torch.OutOfMemoryError:
+            if len(batch_videos) <= 1:
+                raise
+            self.empty_cuda_cache()
+            mid = len(batch_videos) // 2
+            left_features = self._infer_video_batch(batch_videos[:mid])
+            right_features = self._infer_video_batch(batch_videos[mid:])
+            return left_features + right_features
+        finally:
+            del video_batch, slow_pathway, fast_pathway, batch_features
+            self.empty_cuda_cache()
+
+    def _extract_subshot_features_from_chunk(
+        self,
+        chunk_records: list[dict[str, Any]],
+        chunk_tensor: torch.Tensor,
+        chunk_start: float,
+        chunk_end: float,
+    ) -> list[np.ndarray]:
+        subshot_features: list[np.ndarray] = []
+
+        for batch_start in range(0, len(chunk_records), self.config.batch_size):
+            batch_records = chunk_records[batch_start:batch_start + self.config.batch_size]
+            batch_videos = []
+
+            for record in batch_records:
+                subshot_video = self._slice_time_range_from_video_tensor(
+                    video_tensor=chunk_tensor,
+                    video_start=chunk_start,
+                    video_end=chunk_end,
+                    range_start=float(record["clip_start"]),
+                    range_end=float(record["clip_end"]),
+                )
+                subshot_video = temporal_resample_single_video(subshot_video, self.config.num_frames)
+                batch_videos.append(subshot_video)
+
+            batch_features = self._infer_video_batch(batch_videos)
+            subshot_features.extend(batch_features)
+
+        return subshot_features
+
+    def _pool_subshot_features(self, subshot_features: list[np.ndarray]) -> np.ndarray:
+        stacked = np.stack(subshot_features, axis=0).astype(np.float32)
+        pooled = stacked.max(axis=0)
+        return l2_normalize(pooled.astype(np.float32))
+
+    def _cast_output_feature(self, feature: np.ndarray) -> np.ndarray:
+        if self.config.save_dtype == "float16":
+            return feature.astype(np.float16)
+        if self.config.save_dtype == "float32":
+            return feature.astype(np.float32)
+        raise ValueError(f"Unsupported save_dtype: {self.config.save_dtype}")
+
+    def process_video_item(self, item: dict[str, str]) -> dict[str, Any]:
+        shots = self.shot_loader.load(item["shots_json_path"])
+        video_reader = FFmpegVideoReader(item["video_path"])
+        if len(shots) == 0:
+            raise RuntimeError("Khong co shot nao trong file shot json")
+
+        all_subshot_records = build_all_subshot_records(shots, self.config)
+        video_start = float(min(shot["start_time_sec"] for shot in shots))
+        video_end = float(max(shot["end_time_sec"] for shot in shots))
+        if video_end <= video_start:
+            video_end = video_start + 1e-3
+
+        chunk_core_duration = max(float(self.config.full_video_chunk_duration_sec), 1e-3)
+        chunk_margin = max(float(self.config.clip_duration_sec), 1e-3)
+
+        features_by_shot: dict[int, list[np.ndarray]] = {int(shot["shot_id"]): [] for shot in shots}
+        record_cursor = 0
+
+        chunk_start = video_start
+        while chunk_start < video_end and record_cursor < len(all_subshot_records):
+            chunk_core_end = min(chunk_start + chunk_core_duration, video_end)
+            decode_end = min(chunk_core_end + chunk_margin, video_end)
+            chunk_tensor = self._decode_video_tensor(video_reader, chunk_start, decode_end)
+
+            chunk_records: list[dict[str, Any]] = []
+            while record_cursor < len(all_subshot_records):
+                record = all_subshot_records[record_cursor]
+                if float(record["clip_start"]) >= chunk_core_end:
+                    break
+                if float(record["clip_end"]) <= decode_end + 1e-6:
+                    chunk_records.append(record)
+                    record_cursor += 1
+                    continue
+                break
+
+            if len(chunk_records) > 0:
+                chunk_features = self._extract_subshot_features_from_chunk(
+                    chunk_records=chunk_records,
+                    chunk_tensor=chunk_tensor,
+                    chunk_start=chunk_start,
+                    chunk_end=decode_end,
+                )
+                for record, feature in zip(chunk_records, chunk_features):
+                    features_by_shot[int(record["shot_id"])].append(feature)
+
+            del chunk_tensor
+            gc.collect()
+            self.empty_cuda_cache()
+            chunk_start = chunk_core_end
+
+        if record_cursor != len(all_subshot_records):
+            raise RuntimeError("Van con subshot chua duoc xu ly sau khi quet het cac chunk")
+
+        shot_features: list[dict[str, Any]] = []
+        for shot in shots:
+            shot_id = int(shot["shot_id"])
+            shot_subshot_features = features_by_shot[shot_id]
+            if len(shot_subshot_features) == 0:
+                raise RuntimeError(f"Shot {shot_id} khong co subshot feature nao duoc trich xuat")
+
+            pooled_feature = self._pool_subshot_features(shot_subshot_features)
+            shot_features.append(
+                {
+                    "shot_id": shot_id,
+                    "start_frame": int(shot["start_frame"]),
+                    "end_frame": int(shot["end_frame"]),
+                    "start_time_sec": float(shot["start_time_sec"]),
+                    "end_time_sec": float(shot["end_time_sec"]),
+                    "duration_sec": float(shot["duration_sec"]),
+                    "num_subshots": int(len(shot_subshot_features)),
+                    "pooling": "max",
+                    "action_feature": self._cast_output_feature(pooled_feature),
+                }
+            )
+
+        feature_dim = int(shot_features[0]["action_feature"].shape[0]) if shot_features else 0
+        output = {
+            "video_name": item["video_name"],
+            "shots_json_path": item["shots_json_path"],
+            "video_path": item["video_path"],
+            "model_name": "slowfast_r50",
+            "pretrained": bool(self.config.pretrained),
+            "model_path": self.config.model_path,
+            "num_frames": int(self.config.num_frames),
+            "sampling_rate": int(self.config.sampling_rate),
+            "alpha": int(self.config.alpha),
+            "target_fps": float(self.config.target_fps),
+            "clip_duration_sec": float(self.config.clip_duration_sec),
+            "batch_size": int(self.config.batch_size),
+            "full_video_chunk_duration_sec": float(self.config.full_video_chunk_duration_sec),
+            "feature_dim": feature_dim,
+            "feature_dtype": self.config.save_dtype,
+            "num_shots": len(shot_features),
+            "num_subshots_total": int(len(all_subshot_records)),
+            "subshot_pooling": "max",
+            "shots": shot_features,
+        }
+
+        output_path = Path(item["output_pkl_path"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("wb") as file:
+            pickle.dump(output, file)
+
+        return output
