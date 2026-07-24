@@ -82,10 +82,35 @@ class PoolingMovieEventRetriever:
             subtitle_hits = []
             if query["subtitle_query"] and subtitle_searcher is not None:
                 subtitle_hits = subtitle_searcher.search(query["subtitle_query"], config.subtitle_top_k)
+                print(f"[Subtitle] Hits after searcher: {len(subtitle_hits)}")
+                for idx, hit in enumerate(subtitle_hits[:5], start=1):
+                    event_refs = self.mappings.subtitle_mapping.events_for_subtitle(hit.item_id)
+                    shot_refs = self.mappings.subtitle_mapping.shots_for_subtitle(hit.item_id)
+                    print(
+                        "[Subtitle] Mapping "
+                        f"{idx}: subtitle_id={hit.item_id} rank={hit.rank} score={hit.score:.6f} "
+                        f"events={len(event_refs)} shots={len(shot_refs)} "
+                        f"text={hit.text[:120].replace(chr(10), ' ')}"
+                    )
+                    if event_refs:
+                        print(
+                            "[Subtitle]   Top event overlaps: "
+                            + ", ".join(
+                                f"{ref.event_id}({ref.weight:.3f})" for ref in event_refs[:5]
+                            )
+                        )
+                    if shot_refs:
+                        print(
+                            "[Subtitle]   Top shot overlaps: "
+                            + ", ".join(
+                                f"{ref.shot_id}({ref.weight:.3f})" for ref in shot_refs[:5]
+                            )
+                        )
             elif subtitle_encoder is not None:
                 subtitle_query = subtitle_encoder.encode(query["subtitle_query"])
                 scores, faiss_ids = self.full_searcher.search(self.subtitle_index, subtitle_query, config.subtitle_top_k)
                 subtitle_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.subtitle_mapping_ids)
+                print(f"[Subtitle] Hits after embedding search: {len(subtitle_hits)}")
 
             ocr_query = OCRQueryExtractor().extract(raw_query=query["raw_query"], ocr_query=query["ocr_query"])
             ocr_hits = ocr_searcher.search(ocr_query, config.ocr_top_k) if ocr_query else []
