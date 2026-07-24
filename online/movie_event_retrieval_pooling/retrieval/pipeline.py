@@ -183,8 +183,7 @@ class PoolingMovieEventRetriever:
                 save_json(payload, config.output_json)
             return payload
         finally:
-            if runtime is not None:
-                runtime.shutdown()
+            pass
 
     def _build_text_searchers(self, config: SearchConfig) -> tuple[OCRSearcher, SubtitleSearcher | None, object | None]:
         ocr_config_path = self.store_dir / "indexes" / "ocr" / "config.json"

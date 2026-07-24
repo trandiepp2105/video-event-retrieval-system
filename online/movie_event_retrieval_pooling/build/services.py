@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from ..common import ensure_dir, save_json
 from ..config import BuildConfig
@@ -148,6 +149,8 @@ class RetrievalStoreBuilder:
                 subtitle_documents,
             )
             print("[Build] Subtitle documents indexed into Meilisearch")
+            print("[Build] Waiting 15s for Meilisearch indexes to settle before returning ...")
+            time.sleep(15.0)
             save_json(
                 {
                     "backend": "meilisearch",
@@ -204,7 +207,7 @@ class RetrievalStoreBuilder:
             save_json(manifest, config.output_dir / "manifest.json")
             print("[Build] Manifest saved")
             print("[Build] build-all completed successfully")
+            print("[Build] Meilisearch runtime is kept online and will not be auto-shutdown")
             return manifest
         finally:
-            if runtime is not None:
-                runtime.shutdown()
+            pass
