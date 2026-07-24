@@ -31,6 +31,12 @@ Dung cac modality o muc shot de group shot thanh event va sinh event-level outpu
 8. `event_captioning`
 Sinh retrieval caption cho tung event bang Qwen3-VL.
 
+9. `video_keyframe_extraction`
+Trich xuat keyframe o muc video cho nhanh retrieval bang keyframe.
+
+10. `keyframe_visual_reembedding`
+Doc lai danh sach keyframe tham chieu va re-embed bang mot visual model khac thong qua OpenCLIP.
+
 2. `online/`
 Chua cac module retrieval/search phuc vu pha truy van.
 
@@ -59,6 +65,8 @@ python offline_shot_face_continuity_feature_extraction_main.py ...
 python offline_text_embedding_main.py ...
 python offline_event_boundary_detection_main.py ...
 python offline_event_captioning_main.py ...
+python offline_video_keyframe_extraction_main.py ...
+python offline_keyframe_visual_reembedding_main.py ...
 ```
 
 Khong con giu cac thu muc retrieval cung cap voi `online/` nua.
