@@ -1,45 +1,30 @@
 from __future__ import annotations
 
-from collections import Counter
-
 from ...schemas import OCRSearchHit
-from .store import OCRStore
+from .meilisearch_client import MeiliSearchClient
 
 
 class OCRSearcher:
-    def __init__(self, store: OCRStore) -> None:
-        self.store = store
+    def __init__(self, client: MeiliSearchClient, index_uid: str) -> None:
+        self.client = client
+        self.index_uid = index_uid
 
     def search(self, query: str, top_k: int) -> list[OCRSearchHit]:
-        normalized_query = " ".join(query.lower().split())
-        if not normalized_query:
+        query = " ".join(query.split())
+        if not query:
             return []
-        query_terms = normalized_query.split()
+        payload = self.client.search(index_uid=self.index_uid, query=query, limit=top_k)
         hits: list[OCRSearchHit] = []
-        for document in self.store.documents:
-            text = str(document.get("text_clean", "")).lower()
-            if not text:
-                continue
-            score = self._token_overlap_score(query_terms, text.split())
-            if score <= 0.0:
-                continue
+        for rank, item in enumerate(payload.get("hits", []), start=1):
+            ranking_score = item.get("_rankingScore")
+            if ranking_score is None:
+                ranking_score = max(float(top_k - rank + 1), 1.0) / float(max(top_k, 1))
             hits.append(
                 OCRSearchHit(
-                    ocr_id=str(document["ocr_id"]),
-                    score=score,
-                    rank=0,
-                    text=str(document.get("text_raw", "")),
+                    ocr_id=str(item["ocr_id"]),
+                    score=float(ranking_score),
+                    rank=rank,
+                    text=str(item.get("text_raw", "")),
                 )
             )
-        hits.sort(key=lambda item: item.score, reverse=True)
-        return [OCRSearchHit(hit.ocr_id, hit.score, index + 1, hit.text) for index, hit in enumerate(hits[:top_k])]
-
-    @staticmethod
-    def _token_overlap_score(query_terms: list[str], document_terms: list[str]) -> float:
-        doc_counter = Counter(document_terms)
-        match_count = 0
-        for term in query_terms:
-            if doc_counter[term] > 0:
-                doc_counter[term] -= 1
-                match_count += 1
-        return float(match_count) / float(max(len(query_terms), 1))
+        return hits

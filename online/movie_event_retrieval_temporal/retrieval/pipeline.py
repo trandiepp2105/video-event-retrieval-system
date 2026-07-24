@@ -7,7 +7,7 @@ from ..common import load_json, save_json
 from ..config import SearchConfig
 from ..embeddings import SentenceTransformerQueryEncoder, TemporalQueryEncoder
 from ..indexes.faiss import FaissFullSearcher, FaissIndexLoader, FaissSubsetSearcher, SearchHitMapper
-from ..indexes.ocr import OCRSearcher, OCRStore
+from ..indexes.ocr import MeiliSearchClient, MeiliSearchRuntimeManager, OCRSearcher
 from ..mappings.serializer import MappingSerializer
 from ..metadata import MetadataRepository
 from ..retrieval.event_level import EventLevelFusionService, OCRQueryExtractor
@@ -29,122 +29,153 @@ class TemporalMovieEventRetriever:
         self.caption_index = self.index_loader.load(store_dir / "indexes" / "faiss" / "caption.faiss")
         self.shot_index = self.index_loader.load(store_dir / "indexes" / "faiss" / "shot.faiss")
         self.subtitle_index = self.index_loader.load(store_dir / "indexes" / "faiss" / "subtitle.faiss")
-        self.ocr_searcher = OCRSearcher(OCRStore.load(store_dir / "indexes" / "ocr" / "documents.json"))
 
     def search(self, config: SearchConfig) -> dict[str, Any]:
         query = self._load_query(config)
         temporal_encoder = None
         caption_encoder = None
         subtitle_encoder = None
+        runtime = None
 
-        if query["translated_query"]:
-            if config.temporal_checkpoint_path is None:
-                raise ValueError("temporal_checkpoint_path is required when translated_query is provided")
-            temporal_encoder = TemporalQueryEncoder(
-                checkpoint_path=config.temporal_checkpoint_path,
-                clip_model_path_override=config.clip_model_path_override,
-                device=config.event_device,
-            )
-        if query["raw_query"]:
-            if config.caption_model_path is None:
-                raise ValueError("caption_model_path is required when raw_query is provided")
-            caption_encoder = SentenceTransformerQueryEncoder(config.caption_model_path, device=config.caption_device)
-        if query["subtitle_query"]:
-            if config.subtitle_model_path is None:
-                raise ValueError("subtitle_model_path is required when subtitle_query is provided")
-            subtitle_encoder = SentenceTransformerQueryEncoder(config.subtitle_model_path, device=config.subtitle_device)
+        try:
+            if query["translated_query"]:
+                if config.temporal_checkpoint_path is None:
+                    raise ValueError("temporal_checkpoint_path is required when translated_query is provided")
+                temporal_encoder = TemporalQueryEncoder(
+                    checkpoint_path=config.temporal_checkpoint_path,
+                    clip_model_path_override=config.clip_model_path_override,
+                    device=config.event_device,
+                )
+            if query["raw_query"]:
+                if config.caption_model_path is None:
+                    raise ValueError("caption_model_path is required when raw_query is provided")
+                caption_encoder = SentenceTransformerQueryEncoder(config.caption_model_path, device=config.caption_device)
+            if query["subtitle_query"]:
+                if config.subtitle_model_path is None:
+                    raise ValueError("subtitle_model_path is required when subtitle_query is provided")
+                subtitle_encoder = SentenceTransformerQueryEncoder(config.subtitle_model_path, device=config.subtitle_device)
+            ocr_searcher, runtime = self._build_ocr_searcher(config)
 
-        event_hits = []
-        if temporal_encoder is not None:
-            event_query = temporal_encoder.encode_event_query(query["translated_query"])
-            scores, faiss_ids = self.full_searcher.search(self.event_index, event_query, config.event_top_k)
-            event_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.event_mapping)
+            event_hits = []
+            if temporal_encoder is not None:
+                event_query = temporal_encoder.encode_event_query(query["translated_query"])
+                scores, faiss_ids = self.full_searcher.search(self.event_index, event_query, config.event_top_k)
+                event_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.event_mapping)
 
-        caption_hits = []
-        if caption_encoder is not None:
-            caption_query = caption_encoder.encode(query["raw_query"])
-            scores, faiss_ids = self.full_searcher.search(self.caption_index, caption_query, config.caption_top_k)
-            caption_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.caption_mapping)
+            caption_hits = []
+            if caption_encoder is not None:
+                caption_query = caption_encoder.encode(query["raw_query"])
+                scores, faiss_ids = self.full_searcher.search(self.caption_index, caption_query, config.caption_top_k)
+                caption_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.caption_mapping)
 
-        subtitle_hits = []
-        if subtitle_encoder is not None:
-            subtitle_query = subtitle_encoder.encode(query["subtitle_query"])
-            scores, faiss_ids = self.full_searcher.search(self.subtitle_index, subtitle_query, config.subtitle_top_k)
-            subtitle_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.subtitle_mapping_ids)
+            subtitle_hits = []
+            if subtitle_encoder is not None:
+                subtitle_query = subtitle_encoder.encode(query["subtitle_query"])
+                scores, faiss_ids = self.full_searcher.search(self.subtitle_index, subtitle_query, config.subtitle_top_k)
+                subtitle_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.subtitle_mapping_ids)
 
-        ocr_query = OCRQueryExtractor().extract(raw_query=query["raw_query"], ocr_query=query["ocr_query"])
-        ocr_hits = self.ocr_searcher.search(ocr_query, config.ocr_top_k) if ocr_query else []
+            ocr_query = OCRQueryExtractor().extract(raw_query=query["raw_query"], ocr_query=query["ocr_query"])
+            ocr_hits = ocr_searcher.search(ocr_query, config.ocr_top_k) if ocr_query else []
 
-        event_fusion = EventLevelFusionService(self.mappings, rrf_k=config.rrf_k).fuse(
-            event_hits=event_hits,
-            caption_hits=caption_hits,
-            subtitle_hits=subtitle_hits,
-            ocr_hits=ocr_hits,
-            event_weight=config.event_weight,
-            caption_weight=config.caption_weight,
-            subtitle_weight=config.subtitle_weight,
-            ocr_weight=config.ocr_weight,
-        )
-
-        ranked_events = event_fusion.sorted_items()
-        candidate_event_ids = [event_id for event_id, _score in ranked_events[: config.candidate_event_top_k]]
-        candidate_video_ids = self._rank_videos_from_events(ranked_events)[: config.candidate_video_top_k]
-
-        shot_results: list[ShotResult] = []
-        if temporal_encoder is not None and candidate_event_ids:
-            shot_query = temporal_encoder.encode_shot_query(query["translated_query"])
-            candidate_shot_ids = ShotCandidateBuilder(self.mappings).build(
-                event_ids=candidate_event_ids,
-                video_ids=candidate_video_ids,
-            )
-            allowed_faiss_ids = self.mappings.shot_mapping.faiss_ids_from_item_ids(candidate_shot_ids)
-            scores, faiss_ids = self.subset_searcher.search(
-                self.shot_index,
-                shot_query,
-                allowed_faiss_ids,
-                config.shot_top_k,
-            )
-            shot_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.shot_mapping)
-            shot_fusion = ShotLevelFusionService(self.mappings, rrf_k=config.rrf_k).fuse(
-                shot_hits=shot_hits,
+            event_fusion = EventLevelFusionService(self.mappings, rrf_k=config.rrf_k).fuse(
+                event_hits=event_hits,
+                caption_hits=caption_hits,
                 subtitle_hits=subtitle_hits,
                 ocr_hits=ocr_hits,
-                parent_event_scores=dict(ranked_events),
-                shot_weight=config.shot_weight,
+                event_weight=config.event_weight,
+                caption_weight=config.caption_weight,
                 subtitle_weight=config.subtitle_weight,
                 ocr_weight=config.ocr_weight,
-                parent_event_weight=config.parent_event_weight,
             )
-            shot_results = self._format_shot_results(shot_fusion.sorted_items(), shot_fusion.evidence)
-        else:
-            shot_fusion = None
 
-        final_events = self._aggregate_final_events(
-            ranked_events=ranked_events,
-            shot_results=shot_results,
-            event_evidence=event_fusion.evidence,
-        )[: config.final_top_k]
+            ranked_events = event_fusion.sorted_items()
+            candidate_event_ids = [event_id for event_id, _score in ranked_events[: config.candidate_event_top_k]]
+            candidate_video_ids = self._rank_videos_from_events(ranked_events)[: config.candidate_video_top_k]
 
-        payload = {
-            "query": query,
-            "event_level": {
-                "event_embedding_hits": [hit.__dict__ for hit in event_hits[:20]],
-                "caption_hits": [hit.__dict__ for hit in caption_hits[:20]],
-                "subtitle_hits": [hit.__dict__ for hit in subtitle_hits[:20]],
-                "ocr_hits": [hit.__dict__ for hit in ocr_hits[:20]],
-            },
-            "candidates": {
-                "event_ids": candidate_event_ids,
-                "video_ids": candidate_video_ids,
-            },
-            "shot_level": {
-                "top_shots": [shot.__dict__ for shot in shot_results[:20]],
-            },
-            "final_events": [self._event_result_to_dict(result) for result in final_events],
-        }
-        if config.output_json is not None:
-            save_json(payload, config.output_json)
-        return payload
+            shot_results: list[ShotResult] = []
+            if temporal_encoder is not None and candidate_event_ids:
+                shot_query = temporal_encoder.encode_shot_query(query["translated_query"])
+                candidate_shot_ids = ShotCandidateBuilder(self.mappings).build(
+                    event_ids=candidate_event_ids,
+                    video_ids=candidate_video_ids,
+                )
+                allowed_faiss_ids = self.mappings.shot_mapping.faiss_ids_from_item_ids(candidate_shot_ids)
+                scores, faiss_ids = self.subset_searcher.search(
+                    self.shot_index,
+                    shot_query,
+                    allowed_faiss_ids,
+                    config.shot_top_k,
+                )
+                shot_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.shot_mapping)
+                shot_fusion = ShotLevelFusionService(self.mappings, rrf_k=config.rrf_k).fuse(
+                    shot_hits=shot_hits,
+                    subtitle_hits=subtitle_hits,
+                    ocr_hits=ocr_hits,
+                    parent_event_scores=dict(ranked_events),
+                    shot_weight=config.shot_weight,
+                    subtitle_weight=config.subtitle_weight,
+                    ocr_weight=config.ocr_weight,
+                    parent_event_weight=config.parent_event_weight,
+                )
+                shot_results = self._format_shot_results(shot_fusion.sorted_items(), shot_fusion.evidence)
+            else:
+                shot_fusion = None
+
+            final_events = self._aggregate_final_events(
+                ranked_events=ranked_events,
+                shot_results=shot_results,
+                event_evidence=event_fusion.evidence,
+            )[: config.final_top_k]
+
+            payload = {
+                "query": query,
+                "event_level": {
+                    "event_embedding_hits": [hit.__dict__ for hit in event_hits[:20]],
+                    "caption_hits": [hit.__dict__ for hit in caption_hits[:20]],
+                    "subtitle_hits": [hit.__dict__ for hit in subtitle_hits[:20]],
+                    "ocr_hits": [hit.__dict__ for hit in ocr_hits[:20]],
+                },
+                "candidates": {
+                    "event_ids": candidate_event_ids,
+                    "video_ids": candidate_video_ids,
+                },
+                "shot_level": {
+                    "top_shots": [shot.__dict__ for shot in shot_results[:20]],
+                },
+                "final_events": [self._event_result_to_dict(result) for result in final_events],
+            }
+            if config.output_json is not None:
+                save_json(payload, config.output_json)
+            return payload
+        finally:
+            if runtime is not None:
+                runtime.shutdown()
+
+    def _build_ocr_searcher(self, config: SearchConfig) -> tuple[OCRSearcher, object | None]:
+        ocr_config_path = self.store_dir / "indexes" / "ocr" / "config.json"
+        ocr_config = load_json(ocr_config_path)
+        meilisearch_url = config.meilisearch_url or str(ocr_config["url"])
+        meilisearch_index_name = config.meilisearch_index_name or str(ocr_config["index_name"])
+        runtime = None
+        auto_start = config.auto_start_meilisearch or bool(ocr_config.get("auto_start_meilisearch"))
+        if auto_start:
+            binary_path = config.meilisearch_binary_path
+            if binary_path is None and ocr_config.get("meilisearch_binary_path"):
+                binary_path = Path(str(ocr_config["meilisearch_binary_path"]))
+            db_path = config.meilisearch_db_path
+            if db_path is None and ocr_config.get("meilisearch_db_path"):
+                db_path = Path(str(ocr_config["meilisearch_db_path"]))
+            runtime = MeiliSearchRuntimeManager().ensure_running(
+                base_url=meilisearch_url,
+                api_key=config.meilisearch_api_key,
+                binary_path=binary_path,
+                db_path=db_path,
+            )
+        client = MeiliSearchClient(
+            base_url=meilisearch_url,
+            api_key=config.meilisearch_api_key,
+        )
+        return OCRSearcher(client=client, index_uid=meilisearch_index_name), runtime
 
     def _load_query(self, config: SearchConfig) -> dict[str, str]:
         query = {

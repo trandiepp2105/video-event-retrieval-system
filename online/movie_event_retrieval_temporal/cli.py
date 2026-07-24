@@ -23,6 +23,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_all.add_argument("--subtitle_embedding_dir", type=Path, required=True)
     build_all.add_argument("--ocr_dir", type=Path, required=True)
     build_all.add_argument("--output_dir", type=Path, required=True)
+    build_all.add_argument("--meilisearch_url", type=str, required=True)
+    build_all.add_argument("--meilisearch_index_name", type=str, required=True)
+    build_all.add_argument("--meilisearch_api_key", type=str, default=None)
+    build_all.add_argument("--meilisearch_batch_size", type=int, default=1000)
+    build_all.add_argument("--auto_start_meilisearch", action="store_true")
+    build_all.add_argument("--meilisearch_binary_path", type=Path, default=None)
+    build_all.add_argument("--meilisearch_db_path", type=Path, default=None)
     build_all.add_argument("--overwrite", action="store_true")
 
     search = subparsers.add_parser("search")
@@ -54,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--event_device", type=str, default="cpu")
     search.add_argument("--caption_device", type=str, default="cpu")
     search.add_argument("--subtitle_device", type=str, default="cpu")
+    search.add_argument("--meilisearch_url", type=str, default=None)
+    search.add_argument("--meilisearch_index_name", type=str, default=None)
+    search.add_argument("--meilisearch_api_key", type=str, default=None)
+    search.add_argument("--auto_start_meilisearch", action="store_true")
+    search.add_argument("--meilisearch_binary_path", type=Path, default=None)
+    search.add_argument("--meilisearch_db_path", type=Path, default=None)
     search.add_argument("--output_json", type=Path, default=None)
     return parser
 
@@ -93,6 +106,13 @@ def main() -> None:
                 subtitle_embedding_dir=args.subtitle_embedding_dir,
                 ocr_dir=args.ocr_dir,
                 output_dir=args.output_dir,
+                meilisearch_url=args.meilisearch_url,
+                meilisearch_index_name=args.meilisearch_index_name,
+                meilisearch_api_key=args.meilisearch_api_key,
+                meilisearch_batch_size=args.meilisearch_batch_size,
+                auto_start_meilisearch=args.auto_start_meilisearch,
+                meilisearch_binary_path=args.meilisearch_binary_path,
+                meilisearch_db_path=args.meilisearch_db_path,
                 overwrite=args.overwrite,
             )
         )
@@ -131,6 +151,12 @@ def main() -> None:
                 event_device=args.event_device,
                 caption_device=args.caption_device,
                 subtitle_device=args.subtitle_device,
+                meilisearch_url=args.meilisearch_url,
+                meilisearch_index_name=args.meilisearch_index_name,
+                meilisearch_api_key=args.meilisearch_api_key,
+                auto_start_meilisearch=args.auto_start_meilisearch,
+                meilisearch_binary_path=args.meilisearch_binary_path,
+                meilisearch_db_path=args.meilisearch_db_path,
                 output_json=args.output_json,
             )
         )

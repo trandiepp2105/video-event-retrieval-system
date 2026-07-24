@@ -34,4 +34,10 @@ class SearchConfig:
     event_device: str = "cpu"
     caption_device: str = "cpu"
     subtitle_device: str = "cpu"
+    meilisearch_url: str | None = None
+    meilisearch_index_name: str | None = None
+    meilisearch_api_key: str | None = None
+    auto_start_meilisearch: bool = False
+    meilisearch_binary_path: Path | None = None
+    meilisearch_db_path: Path | None = None
     output_json: Path | None = None

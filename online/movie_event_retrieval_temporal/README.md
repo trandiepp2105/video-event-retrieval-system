@@ -6,7 +6,7 @@ Module nay trien khai retrieval theo 2 tang:
    - event embedding FAISS
    - event caption embedding FAISS
    - subtitle embedding FAISS
-   - OCR text store
+   - OCR Meilisearch
 2. Shot-level refinement
    - subset search tren shot FAISS bang `faiss.IDSelectorArray`
    - reuse subtitle/OCR evidence
@@ -22,7 +22,9 @@ python event_retrieval_temporal_main.py build-all \
   --shot_embedding_dir ... \
   --subtitle_embedding_dir ... \
   --ocr_dir ... \
-  --output_dir ...
+  --output_dir ... \
+  --meilisearch_url http://127.0.0.1:7700 \
+  --meilisearch_index_name movie_event_ocr
 ```
 
 ## Search
@@ -33,7 +35,9 @@ python event_retrieval_temporal_main.py search \
   --query_json query.json \
   --temporal_checkpoint_path ... \
   --caption_model_path ... \
-  --subtitle_model_path ...
+  --subtitle_model_path ... \
+  --meilisearch_url http://127.0.0.1:7700 \
+  --meilisearch_index_name movie_event_ocr
 ```
 
 `query.json` co the chua:

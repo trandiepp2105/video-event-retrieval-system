@@ -13,4 +13,11 @@ class BuildConfig:
     subtitle_embedding_dir: Path
     ocr_dir: Path
     output_dir: Path
+    meilisearch_url: str
+    meilisearch_index_name: str
+    meilisearch_api_key: str | None = None
+    meilisearch_batch_size: int = 1000
+    auto_start_meilisearch: bool = False
+    meilisearch_binary_path: Path | None = None
+    meilisearch_db_path: Path | None = None
     overwrite: bool = False
