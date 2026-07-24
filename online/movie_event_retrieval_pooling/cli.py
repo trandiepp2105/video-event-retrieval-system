@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_all.add_argument("--meilisearch_index_name", type=str, required=True)
     build_all.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
     build_all.add_argument("--meilisearch_api_key", type=str, default=None)
-    build_all.add_argument("--meilisearch_batch_size", type=int, default=1000)
+    build_all.add_argument("--meilisearch_batch_size", type=int, default=250)
     build_all.add_argument("--auto_start_meilisearch", action="store_true")
     build_all.add_argument("--meilisearch_binary_path", type=Path, default=None)
     build_all.add_argument("--meilisearch_db_path", type=Path, default=None)

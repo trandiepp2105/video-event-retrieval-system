@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -11,7 +12,9 @@ from urllib import error, request
 class MeiliSearchClient:
     base_url: str
     api_key: str | None = None
-    timeout_sec: int = 120
+    timeout_sec: int = 600
+    max_retries: int = 5
+    retry_backoff_sec: float = 2.0
 
     def create_index(self, index_uid: str, primary_key: str) -> dict[str, Any]:
         return self._request(
@@ -78,17 +81,32 @@ class MeiliSearchClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with request.urlopen(req, timeout=self.timeout_sec) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            if allow_conflict and exc.code == 409:
+        last_exception: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            req = request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with request.urlopen(req, timeout=self.timeout_sec) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except error.HTTPError as exc:
+                if allow_conflict and exc.code == 409:
+                    body = exc.read().decode("utf-8")
+                    return json.loads(body) if body else {"status": 409}
                 body = exc.read().decode("utf-8")
-                return json.loads(body) if body else {"status": 409}
-            body = exc.read().decode("utf-8")
-            raise RuntimeError(
-                f"Meilisearch request failed: method={method} path={path} status={exc.code} body={body}"
-            ) from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"Khong ket noi duoc Meilisearch tai {url}: {exc}") from exc
+                raise RuntimeError(
+                    f"Meilisearch request failed: method={method} path={path} status={exc.code} body={body}"
+                ) from exc
+            except (TimeoutError, socket.timeout, error.URLError) as exc:
+                last_exception = exc
+                if attempt >= self.max_retries:
+                    break
+                sleep_sec = self.retry_backoff_sec * attempt
+                print(
+                    "[OCR] Meilisearch request retry "
+                    f"{attempt}/{self.max_retries} for {method} {path} after error: {exc!r}. "
+                    f"Sleep {sleep_sec:.1f}s before retry."
+                )
+                time.sleep(sleep_sec)
+        raise RuntimeError(
+            f"Khong ket noi/on dinh duoc Meilisearch tai {url} sau {self.max_retries} lan thu. "
+            f"Loi cuoi: {last_exception!r}"
+        ) from last_exception
