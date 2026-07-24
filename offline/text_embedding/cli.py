@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .pipeline import TextEmbeddingConfig, TextEmbeddingPipeline
+from .config import TextEmbeddingConfig
+from .pipeline import TextEmbeddingPipeline
 
 
 def build_parser() -> argparse.ArgumentParser:

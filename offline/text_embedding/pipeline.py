@@ -2,163 +2,17 @@ from __future__ import annotations
 
 import json
 import pickle
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-
-SUPPORTED_DTYPES = {"float16": np.float16, "float32": np.float32}
-
-
-@dataclass
-class TextEmbeddingConfig:
-    input_dir: Path
-    output_dir: Path
-    model_name_or_path: str
-    input_type: str
-    device: str | None = None
-    batch_size: int = 32
-    normalize_embeddings: bool = True
-    save_dtype: str = "float32"
-    start_index: int = 0
-    end_index: int | None = None
-    video_ids: list[str] | None = None
-    overwrite: bool = False
-    text_field: str = "text"
-    caption_field: str = "caption"
-
-
-def l2_normalize(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float32)
-    if x.ndim == 1:
-        x = x.reshape(1, -1)
-    norms = np.linalg.norm(x, axis=1, keepdims=True)
-    return x / np.clip(norms, eps, None)
-
-
-class JsonDatasetScanner:
-    def __init__(
-        self,
-        input_dir: Path,
-        start_index: int = 0,
-        end_index: int | None = None,
-        video_ids: list[str] | None = None,
-    ) -> None:
-        self.input_dir = Path(input_dir)
-        self.start_index = int(start_index)
-        self.end_index = end_index
-        self.video_ids = [str(video_id) for video_id in video_ids] if video_ids else None
-
-    def get_items(self) -> list[Path]:
-        if self.video_ids:
-            items: list[Path] = []
-            for video_id in self.video_ids:
-                path = self.input_dir / f"{video_id}.json"
-                if not path.exists():
-                    raise FileNotFoundError(f"Missing input file for video_id={video_id}: {path}")
-                items.append(path)
-            return items
-
-        json_paths = sorted(self.input_dir.glob("*.json"))
-        start = max(0, self.start_index)
-        if start >= len(json_paths):
-            return []
-        if self.end_index is None:
-            return json_paths[start:]
-        return json_paths[start : self.end_index + 1]
-
-
-class SubtitleJsonLoader:
-    OPTIONAL_FIELDS = ("frame_start", "frame_end", "start_time_sec", "end_time_sec")
-
-    def __init__(self, text_field: str = "text") -> None:
-        self.text_field = text_field
-
-    def load(self, json_path: Path) -> list[dict[str, Any]]:
-        with json_path.open("r", encoding="utf-8") as file:
-            items = json.load(file)
-
-        if not isinstance(items, list):
-            raise ValueError(f"Subtitle JSON must be a list: {json_path}")
-
-        normalized: list[dict[str, Any]] = []
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                raise ValueError(f"Subtitle item {index} in {json_path} must be a dict")
-            if self.text_field not in item:
-                raise ValueError(f"Subtitle item {index} in {json_path} missing field: {self.text_field}")
-
-            text = str(item[self.text_field]).strip()
-            if not text:
-                raise ValueError(f"Subtitle item {index} in {json_path} has empty text")
-
-            payload = dict(item)
-            payload[self.text_field] = text
-            for field in self.OPTIONAL_FIELDS:
-                if field in payload and payload[field] is not None:
-                    payload[field] = payload[field]
-            normalized.append(payload)
-        return normalized
-
-
-class CaptionJsonLoader:
-    OPTIONAL_FIELDS = ("frame_start", "frame_end", "start_time_sec", "end_time_sec")
-
-    def __init__(self, caption_field: str = "caption") -> None:
-        self.caption_field = caption_field
-
-    def load(self, json_path: Path) -> list[dict[str, Any]]:
-        with json_path.open("r", encoding="utf-8") as file:
-            items = json.load(file)
-
-        if not isinstance(items, list):
-            raise ValueError(f"Caption JSON must be a list: {json_path}")
-
-        normalized: list[dict[str, Any]] = []
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                raise ValueError(f"Caption item {index} in {json_path} must be a dict")
-            if "event_id" not in item:
-                raise ValueError(f"Caption item {index} in {json_path} missing field: event_id")
-            if self.caption_field not in item:
-                raise ValueError(f"Caption item {index} in {json_path} missing field: {self.caption_field}")
-
-            caption = str(item[self.caption_field]).strip()
-            if not caption:
-                raise ValueError(f"Caption item {index} in {json_path} has empty caption")
-
-            payload = dict(item)
-            payload[self.caption_field] = caption
-            normalized.append(payload)
-        return normalized
-
-
-class VietnameseTextEmbedder:
-    def __init__(self, config: TextEmbeddingConfig) -> None:
-        self.config = config
-        self.model = SentenceTransformer(
-            config.model_name_or_path,
-            device=config.device,
-        )
-
-    def encode_texts(self, texts: list[str]) -> np.ndarray:
-        embeddings = self.model.encode(
-            texts,
-            batch_size=self.config.batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=self.config.normalize_embeddings,
-            show_progress_bar=False,
-        ).astype(np.float32)
-
-        if embeddings.ndim == 1:
-            embeddings = embeddings.reshape(1, -1)
-        if not self.config.normalize_embeddings and embeddings.size > 0:
-            embeddings = l2_normalize(embeddings)
-        return embeddings
+from .common import SUPPORTED_DTYPES
+from .config import TextEmbeddingConfig
+from .embedder import VietnameseTextEmbedder
+from .loaders import CaptionJsonLoader, SubtitleJsonLoader
+from .scanner import JsonDatasetScanner
 
 
 class TextEmbeddingPipeline:
