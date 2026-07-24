@@ -15,6 +15,7 @@ class BuildConfig:
     output_dir: Path
     meilisearch_url: str
     meilisearch_index_name: str
+    subtitle_meilisearch_index_name: str | None = None
     meilisearch_api_key: str | None = None
     meilisearch_batch_size: int = 1000
     auto_start_meilisearch: bool = False
