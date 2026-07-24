@@ -26,6 +26,7 @@ class MeiliSearchRuntime:
     def shutdown(self) -> None:
         if self.process is None or not self.started_by_us:
             return
+        print(f"[OCR] Shutting down Meilisearch started by this process at {self.base_url}")
         if self.process.poll() is None:
             self.process.terminate()
             try:
@@ -45,7 +46,9 @@ class MeiliSearchRuntimeManager:
         db_path: Path | None,
         wait_timeout_sec: float = 30.0,
     ) -> MeiliSearchRuntime:
+        print(f"[OCR] Checking Meilisearch health at {base_url} ...")
         if _healthcheck(base_url):
+            print(f"[OCR] Meilisearch already running at {base_url}")
             return MeiliSearchRuntime(base_url=base_url, process=None, started_by_us=False)
 
         if binary_path is None:
@@ -66,6 +69,9 @@ class MeiliSearchRuntimeManager:
             db_path.mkdir(parents=True, exist_ok=True)
             args.extend(["--db-path", str(db_path)])
 
+        print(f"[OCR] Starting Meilisearch from binary: {binary_path}")
+        print(f"[OCR] Meilisearch db path: {db_path if db_path is not None else '(default internal path)'}")
+        print(f"[OCR] Meilisearch http addr: {http_addr}")
         process = subprocess.Popen(
             args,
             stdout=subprocess.DEVNULL,
@@ -81,6 +87,7 @@ class MeiliSearchRuntimeManager:
                     f"Khong the start local server tai {base_url}."
                 )
             if _healthcheck(base_url):
+                print(f"[OCR] Meilisearch is healthy at {base_url}")
                 return MeiliSearchRuntime(base_url=base_url, process=process, started_by_us=True)
             time.sleep(0.5)
 

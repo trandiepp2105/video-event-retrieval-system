@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 
 from ..common import load_pickle
 from ..metadata.loader import DatasetMetadataLoader
@@ -12,7 +13,8 @@ class EventEmbeddingLoader:
     def load(self, input_dir: Path) -> tuple[np.ndarray, list[str]]:
         vectors: list[np.ndarray] = []
         item_ids: list[str] = []
-        for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
+        paths = sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem))
+        for path in tqdm(paths, desc="Load event embeddings"):
             payload = load_pickle(path)
             video_id = str(payload.get("video_id", path.stem))
             for item in payload["events"]:
@@ -25,7 +27,8 @@ class ShotEmbeddingLoader:
     def load(self, input_dir: Path) -> tuple[np.ndarray, list[str]]:
         vectors: list[np.ndarray] = []
         item_ids: list[str] = []
-        for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
+        paths = sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem))
+        for path in tqdm(paths, desc="Load shot embeddings"):
             payload = load_pickle(path)
             video_id = str(payload.get("video_id", path.stem))
             for item in payload["shots"]:
@@ -38,7 +41,8 @@ class CaptionEmbeddingLoader:
     def load(self, input_dir: Path) -> tuple[np.ndarray, list[str]]:
         vectors: list[np.ndarray] = []
         item_ids: list[str] = []
-        for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
+        paths = sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem))
+        for path in tqdm(paths, desc="Load caption embeddings"):
             payload = load_pickle(path)
             video_id = str(payload.get("video_id", path.stem))
             items = payload.get("captions", [])
@@ -55,7 +59,8 @@ class SubtitleEmbeddingLoader:
     def load(self, input_dir: Path) -> tuple[np.ndarray, list[str]]:
         vectors: list[np.ndarray] = []
         item_ids: list[str] = []
-        for path in sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem)):
+        paths = sorted(input_dir.glob("*.pkl"), key=lambda value: int(value.stem))
+        for path in tqdm(paths, desc="Load subtitle embeddings"):
             payload = load_pickle(path)
             video_id = str(payload.get("video_id", path.stem))
             items = payload.get("subtitles", payload.get("captions", []))

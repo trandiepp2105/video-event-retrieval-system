@@ -46,24 +46,45 @@ class RetrievalStoreBuilder:
 
     def build(self, config: BuildConfig) -> dict:
         runtime = None
+        print("[Build] Start build-all for temporal event retrieval store")
+        print(f"[Build] Output dir: {config.output_dir}")
         if config.auto_start_meilisearch:
+            print("[Build] Auto-start Meilisearch is enabled")
             runtime = MeiliSearchRuntimeManager().ensure_running(
                 base_url=config.meilisearch_url,
                 api_key=config.meilisearch_api_key,
                 binary_path=config.meilisearch_binary_path,
                 db_path=config.meilisearch_db_path,
             )
+        else:
+            print("[Build] Auto-start Meilisearch is disabled")
+            print(f"[Build] Expect external Meilisearch at: {config.meilisearch_url}")
+        print("[Build] Phase 1/6: load metadata repository")
         metadata = load_metadata_repository(config)
+        print(
+            f"[Build] Metadata loaded: videos={len(metadata.videos)}, "
+            f"events={len(metadata.events)}, shots={len(metadata.shots)}, "
+            f"subtitles={len(metadata.subtitles)}, ocr_items={len(metadata.ocr_items)}"
+        )
         try:
             ensure_dir(config.output_dir)
             ensure_dir(config.output_dir / "indexes" / "faiss")
             ensure_dir(config.output_dir / "indexes" / "ocr")
 
+            print("[Build] Phase 2/6: load embedding matrices")
             event_embeddings, event_item_ids = EventEmbeddingLoader().load(config.event_embedding_dir)
             caption_embeddings, caption_item_ids = CaptionEmbeddingLoader().load(config.caption_embedding_dir)
             shot_embeddings, shot_item_ids = ShotEmbeddingLoader().load(config.shot_embedding_dir)
             subtitle_embeddings, subtitle_item_ids = SubtitleEmbeddingLoader().load(config.subtitle_embedding_dir)
+            print(
+                "[Build] Embeddings loaded: "
+                f"event_vectors={len(event_item_ids)} shape={event_embeddings.shape}, "
+                f"caption_vectors={len(caption_item_ids)} shape={caption_embeddings.shape}, "
+                f"shot_vectors={len(shot_item_ids)} shape={shot_embeddings.shape}, "
+                f"subtitle_vectors={len(subtitle_item_ids)} shape={subtitle_embeddings.shape}"
+            )
 
+            print("[Build] Phase 3/6: validate embeddings")
             for embeddings, item_ids in (
                 (event_embeddings, event_item_ids),
                 (caption_embeddings, caption_item_ids),
@@ -71,7 +92,9 @@ class RetrievalStoreBuilder:
                 (subtitle_embeddings, subtitle_item_ids),
             ):
                 self.validator.validate(embeddings, item_ids)
+            print("[Build] Embedding validation done")
 
+            print("[Build] Phase 4/6: normalize embeddings and build FAISS indexes")
             event_embeddings = self.normalizer.normalize(event_embeddings)
             caption_embeddings = self.normalizer.normalize(caption_embeddings)
             shot_embeddings = self.normalizer.normalize(shot_embeddings)
@@ -81,7 +104,9 @@ class RetrievalStoreBuilder:
             self.index_saver.save(self.index_builder.build(caption_embeddings), config.output_dir / "indexes" / "faiss" / "caption.faiss")
             self.index_saver.save(self.index_builder.build(shot_embeddings), config.output_dir / "indexes" / "faiss" / "shot.faiss")
             self.index_saver.save(self.index_builder.build(subtitle_embeddings), config.output_dir / "indexes" / "faiss" / "subtitle.faiss")
+            print("[Build] Saved FAISS indexes: event, caption, shot, subtitle")
 
+            print("[Build] Phase 5/6: build and save mappings")
             mappings = MappingBundleBuilder().build(
                 metadata=metadata,
                 event_item_ids=event_item_ids,
@@ -90,18 +115,24 @@ class RetrievalStoreBuilder:
                 subtitle_item_ids=subtitle_item_ids,
             )
             self.mapping_serializer.save(mappings, config.output_dir)
+            print("[Build] Mappings saved")
 
+            print("[Build] Phase 6/6: build OCR documents and index with Meilisearch")
             ocr_documents = [self.ocr_document_builder.build(record) for record in metadata.ocr_items.values()]
+            print(f"[Build] OCR documents prepared: {len(ocr_documents)}")
             OCRStore(documents=ocr_documents).save(config.output_dir / "indexes" / "ocr" / "documents.json")
+            print("[Build] Saved OCR documents.json")
             meili_client = MeiliSearchClient(
                 base_url=config.meilisearch_url,
                 api_key=config.meilisearch_api_key,
             )
+            print(f"[Build] Configuring Meilisearch index: {config.meilisearch_index_name}")
             OCRIndexConfigurator(meili_client).configure(config.meilisearch_index_name)
             OCRIndexWriter(meili_client, batch_size=config.meilisearch_batch_size).add_documents(
                 config.meilisearch_index_name,
                 ocr_documents,
             )
+            print("[Build] OCR documents indexed into Meilisearch")
             save_json(
                 {
                     "backend": "meilisearch",
@@ -141,6 +172,8 @@ class RetrievalStoreBuilder:
                 "num_ocr_items": len(metadata.ocr_items),
             }
             save_json(manifest, config.output_dir / "manifest.json")
+            print("[Build] Manifest saved")
+            print("[Build] build-all completed successfully")
             return manifest
         finally:
             if runtime is not None:
