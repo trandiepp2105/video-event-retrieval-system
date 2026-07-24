@@ -28,6 +28,9 @@ Embed subtitle va event caption bang Vietnamese embedding model.
 7. `event_boundary_detection`
 Dung cac modality o muc shot de group shot thanh event va sinh event-level outputs.
 
+8. `event_captioning`
+Sinh retrieval caption cho tung event bang Qwen3-VL.
+
 2. `online/`
 Chua cac module retrieval/search phuc vu pha truy van.
 
@@ -55,6 +58,7 @@ python offline_subtitle_ocr_extraction_main.py ...
 python offline_shot_face_continuity_feature_extraction_main.py ...
 python offline_text_embedding_main.py ...
 python offline_event_boundary_detection_main.py ...
+python offline_event_captioning_main.py ...
 ```
 
 Khong con giu cac thu muc retrieval cung cap voi `online/` nua.
