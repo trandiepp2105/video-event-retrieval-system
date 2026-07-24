@@ -1,6 +1,7 @@
 faiss-cpu
 numpy
 open-clip-torch
+rapidfuzz
 sentence-transformers
 torch
 tqdm

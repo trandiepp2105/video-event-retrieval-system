@@ -3,33 +3,28 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from online.movie_event_retrieval_temporal.common import load_json, save_json
-from online.movie_event_retrieval_temporal.indexes.faiss import (
+from ..common import load_json, save_json
+from ..indexes.faiss import (
     FaissFullSearcher,
     FaissIndexLoader,
     FaissSubsetSearcher,
     SearchHitMapper,
 )
-from online.movie_event_retrieval_temporal.indexes.ocr import (
-    MeiliSearchClient,
-    MeiliSearchRuntimeManager,
-    OCRSearcher,
-    SubtitleSearcher,
-)
-from online.movie_event_retrieval_temporal.mappings.serializer import MappingSerializer
-from online.movie_event_retrieval_temporal.metadata import MetadataRepository
-from online.movie_event_retrieval_temporal.retrieval.event_level import (
+from ..mappings.serializer import MappingSerializer
+from ..metadata import MetadataRepository
+from .event_level import (
     EventLevelFusionService,
     OCRQueryExtractor,
 )
-from online.movie_event_retrieval_temporal.retrieval.shot_level import (
+from .shot_level import (
     ShotCandidateBuilder,
     ShotLevelFusionService,
 )
-from online.movie_event_retrieval_temporal.schemas import EventResult, ShotResult
+from ..schemas import EventResult, ShotResult
 
 from ..config import SearchConfig
 from ..embeddings import OpenClipQueryEncoder, SentenceTransformerQueryEncoder
+from ..indexes.ocr import MeiliSearchClient, MeiliSearchRuntimeManager, OCRSearcher, SubtitleSearcher
 
 
 class PoolingMovieEventRetriever:

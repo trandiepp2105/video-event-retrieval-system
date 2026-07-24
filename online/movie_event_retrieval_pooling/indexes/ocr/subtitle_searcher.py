@@ -3,6 +3,7 @@ from __future__ import annotations
 from rapidfuzz import fuzz
 
 from ...schemas import SearchHit
+
 from .meilisearch_client import MeiliSearchClient
 
 

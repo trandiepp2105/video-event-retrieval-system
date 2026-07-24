@@ -70,9 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_metadata(store_dir: Path):
-    from online.movie_event_retrieval_temporal.common import load_json
-    from online.movie_event_retrieval_temporal.metadata import MetadataRepository
-    from online.movie_event_retrieval_temporal.schemas import (
+    from .common import load_json
+    from .metadata import MetadataRepository
+    from .schemas import (
         EventRecord,
         OCRRecord,
         ShotRecord,
@@ -105,7 +105,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "build-all":
-        from online.movie_event_retrieval_temporal.build import RetrievalStoreBuilder
+        from .build import RetrievalStoreBuilder
 
         manifest = RetrievalStoreBuilder().build(
             BuildConfig(

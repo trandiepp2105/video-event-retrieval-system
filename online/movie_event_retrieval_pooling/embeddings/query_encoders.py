@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from online.movie_event_retrieval_temporal.common import l2_normalize
+from ..common import l2_normalize
 
 
 class SentenceTransformerQueryEncoder:
