@@ -63,10 +63,18 @@ class SubtitleEmbeddingLoader:
         for path in tqdm(paths, desc="Load subtitle embeddings"):
             payload = load_pickle(path)
             video_id = str(payload.get("video_id", path.stem))
-            items = payload.get("subtitles", payload.get("captions", []))
+            items = payload.get("subtitles")
+            if items is None:
+                items = payload.get("items")
+            if items is None:
+                items = payload.get("captions", [])
             embeddings = np.asarray(payload["embeddings"], dtype=np.float32)
             if len(items) != len(embeddings):
-                raise ValueError(f"Subtitle count mismatch in {path}")
+                raise ValueError(
+                    f"Subtitle count mismatch in {path}: "
+                    f"num_items={len(items)} num_embeddings={len(embeddings)} "
+                    f"available_keys={list(payload)[:20]}"
+                )
             for index, _item in enumerate(items):
                 item_ids.append(DatasetMetadataLoader.make_subtitle_id(video_id, index))
                 vectors.append(embeddings[index])
