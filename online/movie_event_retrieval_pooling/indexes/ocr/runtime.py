@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import selectors
 import subprocess
 import time
 from dataclasses import dataclass
@@ -56,39 +57,60 @@ class MeiliSearchRuntimeManager:
         print(f"[OCR] Starting Meilisearch from binary: {binary_path}")
         print(f"[OCR] Meilisearch db path: {db_path if db_path is not None else '(default internal path)'}")
         print(f"[OCR] Meilisearch http addr: {host_port}")
-        stdout_target = subprocess.DEVNULL
-        stderr_target = subprocess.DEVNULL
+        startup_log_path = None
         if db_path is not None:
-            log_path = db_path / "meilisearch.log"
-            log_file = open(log_path, "a", encoding="utf-8")
-            stdout_target = log_file
-            stderr_target = log_file
-            print(f"[OCR] Meilisearch log path: {log_path}")
-        else:
-            log_file = None
+            startup_log_path = db_path / "meilisearch.log"
+            print(f"[OCR] Meilisearch log path: {startup_log_path}")
 
         process = subprocess.Popen(
             cmd,
-            stdout=stdout_target,
-            stderr=stderr_target,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             text=True,
             start_new_session=True,
             close_fds=True,
             env=os.environ.copy(),
         )
-        if log_file is not None:
-            log_file.close()
+        selector = selectors.DefaultSelector()
+        if process.stdout is not None:
+            selector.register(process.stdout, selectors.EVENT_READ)
+        startup_logs: list[str] = []
 
         started = time.time()
         while (time.time() - started) < timeout_sec:
+            for key, _mask in selector.select(timeout=0):
+                line = key.fileobj.readline()
+                if line:
+                    startup_logs.append(line.rstrip("\n"))
             if process.poll() is not None:
-                raise RuntimeError(f"Meilisearch process da thoat som voi ma {process.returncode}.")
+                if process.stdout is not None:
+                    remainder = process.stdout.read()
+                    if remainder:
+                        startup_logs.extend(remainder.splitlines())
+                if startup_log_path is not None and startup_logs:
+                    startup_log_path.write_text("\n".join(startup_logs) + "\n", encoding="utf-8")
+                excerpt = "\n".join(startup_logs[-20:]) if startup_logs else "(khong co startup log)"
+                raise RuntimeError(
+                    "Meilisearch process da thoat som voi ma "
+                    f"{process.returncode}. Startup log:\n{excerpt}"
+                )
             if self._is_healthy(base_url, api_key):
+                if startup_log_path is not None and startup_logs:
+                    startup_log_path.write_text("\n".join(startup_logs) + "\n", encoding="utf-8")
+                selector.close()
                 print(f"[OCR] Meilisearch is healthy at {base_url}")
                 return MeiliSearchRuntime(base_url=base_url, process=process, started_by_this_process=True)
             time.sleep(0.5)
 
         process.terminate()
+        if process.stdout is not None:
+            remainder = process.stdout.read()
+            if remainder:
+                startup_logs.extend(remainder.splitlines())
+        if startup_log_path is not None and startup_logs:
+            startup_log_path.write_text("\n".join(startup_logs) + "\n", encoding="utf-8")
+        selector.close()
         raise RuntimeError(f"Het thoi gian doi Meilisearch san sang tai {base_url}.")
 
     @staticmethod
