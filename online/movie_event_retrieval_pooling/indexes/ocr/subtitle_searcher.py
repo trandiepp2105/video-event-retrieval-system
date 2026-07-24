@@ -91,6 +91,21 @@ class SubtitleSearcher:
         print(f"[Subtitle] Search start | index={self.index_uid} | top_k={top_k} | retrieve_k={retrieve_k}")
         print(f"[Subtitle] Raw query: {query}")
         print(f"[Subtitle] Normalized query: {query_norm}")
+        try:
+            index_info = self.client.get_index(self.index_uid)
+            index_stats = self.client.get_index_stats(self.index_uid)
+            print(
+                "[Subtitle] Index info: "
+                f"uid={index_info.get('uid')} "
+                f"primaryKey={index_info.get('primaryKey')}"
+            )
+            print(
+                "[Subtitle] Index stats: "
+                f"documents={index_stats.get('numberOfDocuments')} "
+                f"isIndexing={index_stats.get('isIndexing')}"
+            )
+        except Exception as exc:
+            print(f"[Subtitle] Failed to inspect index '{self.index_uid}': {exc!r}")
         payload = self.client.search(
             index_uid=self.index_uid,
             query=query_norm,

@@ -46,6 +46,12 @@ class MeiliSearchClient:
             payload["showRankingScore"] = bool(show_ranking_score)
         return self._request("POST", f"/indexes/{index_uid}/search", payload)
 
+    def get_index(self, index_uid: str) -> dict[str, Any]:
+        return self._request("GET", f"/indexes/{index_uid}")
+
+    def get_index_stats(self, index_uid: str) -> dict[str, Any]:
+        return self._request("GET", f"/indexes/{index_uid}/stats")
+
     def get_task(self, task_uid: int) -> dict[str, Any]:
         return self._request("GET", f"/tasks/{task_uid}")
 
