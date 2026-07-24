@@ -27,8 +27,24 @@ class MeiliSearchClient:
     def add_documents(self, index_uid: str, documents: list[dict[str, Any]]) -> dict[str, Any]:
         return self._request("POST", f"/indexes/{index_uid}/documents", documents)
 
-    def search(self, index_uid: str, query: str, limit: int) -> dict[str, Any]:
-        return self._request("POST", f"/indexes/{index_uid}/search", {"q": query, "limit": int(limit)})
+    def search(
+        self,
+        index_uid: str,
+        query: str,
+        limit: int,
+        *,
+        matching_strategy: str | None = None,
+        attributes_to_retrieve: list[str] | None = None,
+        show_ranking_score: bool | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"q": query, "limit": int(limit)}
+        if matching_strategy is not None:
+            payload["matchingStrategy"] = str(matching_strategy)
+        if attributes_to_retrieve is not None:
+            payload["attributesToRetrieve"] = list(attributes_to_retrieve)
+        if show_ranking_score is not None:
+            payload["showRankingScore"] = bool(show_ranking_score)
+        return self._request("POST", f"/indexes/{index_uid}/search", payload)
 
     def get_task(self, task_uid: int) -> dict[str, Any]:
         return self._request("GET", f"/tasks/{task_uid}")

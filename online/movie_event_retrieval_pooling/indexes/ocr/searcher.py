@@ -14,7 +14,14 @@ class OCRSearcher:
         query = " ".join(query.split())
         if not query:
             return []
-        payload = self.client.search(index_uid=self.index_uid, query=query, limit=top_k)
+        payload = self.client.search(
+            index_uid=self.index_uid,
+            query=query,
+            limit=top_k,
+            matching_strategy="last",
+            attributes_to_retrieve=["*"],
+            show_ranking_score=True,
+        )
         hits: list[OCRSearchHit] = []
         for rank, item in enumerate(payload.get("hits", []), start=1):
             ranking_score = item.get("_rankingScore")

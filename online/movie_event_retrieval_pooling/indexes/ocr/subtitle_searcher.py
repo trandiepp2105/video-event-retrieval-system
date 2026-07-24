@@ -80,7 +80,14 @@ class SubtitleSearcher:
             return []
 
         retrieve_k = max(int(top_k), min(int(top_k) * self.candidate_multiplier, 1000))
-        payload = self.client.search(index_uid=self.index_uid, query=query_norm, limit=retrieve_k)
+        payload = self.client.search(
+            index_uid=self.index_uid,
+            query=query_norm,
+            limit=retrieve_k,
+            matching_strategy="last",
+            attributes_to_retrieve=["*"],
+            show_ranking_score=False,
+        )
 
         rescored: list[tuple[float, str, str]] = []
         for item in payload.get("hits", []):
