@@ -1,0 +1,7 @@
+faiss-cpu
+numpy
+open-clip-torch
+sentence-transformers
+torch
+tqdm
+transformers

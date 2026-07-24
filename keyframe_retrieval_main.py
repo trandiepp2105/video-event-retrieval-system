@@ -1,0 +1,5 @@
+from online.movie_keyframe_retrieval.cli import main
+
+
+if __name__ == "__main__":
+    main()
