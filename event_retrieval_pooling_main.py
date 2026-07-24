@@ -1,7 +1,4 @@
-def main() -> None:
-    raise NotImplementedError(
-        "movie_event_retrieval_pooling chua duoc trien khai."
-    )
+from online.movie_event_retrieval_pooling.cli import main
 
 
 if __name__ == "__main__":

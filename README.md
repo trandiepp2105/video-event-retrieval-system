@@ -46,10 +46,10 @@ Ben trong `online/` hien tai co:
 Da duoc trien khai va co the chay duoc hien tai.
 
 2. `movie_event_retrieval_pooling`
-Khung cho event retrieval theo huong pooling, chua trien khai logic.
+Event retrieval theo huong pooling. Nhánh visual query dùng CLIP text encoder để search trên event embeddings va shot embeddings pooling.
 
 3. `movie_event_retrieval_temporal`
-Khung cho event retrieval theo huong temporal, chua trien khai logic.
+Event retrieval theo huong temporal. Nhánh visual query dùng checkpoint temporal retrieval để encode query vao event/shot space da hoc.
 
 Entry scripts o muc goc van duoc giu lai de tranh vo cach chay cu:
 
