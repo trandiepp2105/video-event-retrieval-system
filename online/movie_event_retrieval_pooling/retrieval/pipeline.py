@@ -14,6 +14,7 @@ from online.movie_event_retrieval_temporal.indexes.ocr import (
     MeiliSearchClient,
     MeiliSearchRuntimeManager,
     OCRSearcher,
+    SubtitleSearcher,
 )
 from online.movie_event_retrieval_temporal.mappings.serializer import MappingSerializer
 from online.movie_event_retrieval_temporal.metadata import MetadataRepository
@@ -50,7 +51,6 @@ class PoolingMovieEventRetriever:
         query = self._load_query(config)
         visual_encoder = None
         caption_encoder = None
-        subtitle_encoder = None
         runtime = None
 
         try:
@@ -67,11 +67,8 @@ class PoolingMovieEventRetriever:
                 if config.caption_model_path is None:
                     raise ValueError("caption_model_path is required when raw_query is provided")
                 caption_encoder = SentenceTransformerQueryEncoder(config.caption_model_path, device=config.caption_device)
-            if query["subtitle_query"]:
-                if config.subtitle_model_path is None:
-                    raise ValueError("subtitle_model_path is required when subtitle_query is provided")
-                subtitle_encoder = SentenceTransformerQueryEncoder(config.subtitle_model_path, device=config.subtitle_device)
-            ocr_searcher, runtime = self._build_ocr_searcher(config)
+            subtitle_encoder = self._build_subtitle_encoder(config, query["subtitle_query"])
+            ocr_searcher, subtitle_searcher, runtime = self._build_text_searchers(config)
 
             event_hits = []
             shot_query_vector = None
@@ -88,7 +85,9 @@ class PoolingMovieEventRetriever:
                 caption_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.caption_mapping)
 
             subtitle_hits = []
-            if subtitle_encoder is not None:
+            if query["subtitle_query"] and subtitle_searcher is not None:
+                subtitle_hits = subtitle_searcher.search(query["subtitle_query"], config.subtitle_top_k)
+            elif subtitle_encoder is not None:
                 subtitle_query = subtitle_encoder.encode(query["subtitle_query"])
                 scores, faiss_ids = self.full_searcher.search(self.subtitle_index, subtitle_query, config.subtitle_top_k)
                 subtitle_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.subtitle_mapping_ids)
@@ -167,11 +166,12 @@ class PoolingMovieEventRetriever:
             if runtime is not None:
                 runtime.shutdown()
 
-    def _build_ocr_searcher(self, config: SearchConfig) -> tuple[OCRSearcher, object | None]:
+    def _build_text_searchers(self, config: SearchConfig) -> tuple[OCRSearcher, SubtitleSearcher | None, object | None]:
         ocr_config_path = self.store_dir / "indexes" / "ocr" / "config.json"
         ocr_config = load_json(ocr_config_path)
         meilisearch_url = config.meilisearch_url or str(ocr_config["url"])
         meilisearch_index_name = config.meilisearch_index_name or str(ocr_config["index_name"])
+        subtitle_searcher: SubtitleSearcher | None = None
         runtime = None
         auto_start = config.auto_start_meilisearch or bool(ocr_config.get("auto_start_meilisearch"))
         if auto_start:
@@ -191,7 +191,21 @@ class PoolingMovieEventRetriever:
             base_url=meilisearch_url,
             api_key=config.meilisearch_api_key,
         )
-        return OCRSearcher(client=client, index_uid=meilisearch_index_name), runtime
+        if config.subtitle_backend == "meilisearch":
+            subtitle_config = load_json(self.store_dir / "indexes" / "subtitle_text" / "config.json")
+            subtitle_index_name = config.subtitle_meilisearch_index_name or str(subtitle_config["index_name"])
+            subtitle_searcher = SubtitleSearcher(client=client, index_uid=subtitle_index_name)
+        return OCRSearcher(client=client, index_uid=meilisearch_index_name), subtitle_searcher, runtime
+
+    @staticmethod
+    def _build_subtitle_encoder(config: SearchConfig, subtitle_query: str) -> SentenceTransformerQueryEncoder | None:
+        if not subtitle_query:
+            return None
+        if config.subtitle_backend == "meilisearch":
+            return None
+        if config.subtitle_model_path is None:
+            raise ValueError("subtitle_model_path is required when subtitle_backend=embedding and subtitle_query is provided")
+        return SentenceTransformerQueryEncoder(config.subtitle_model_path, device=config.subtitle_device)
 
     def _load_query(self, config: SearchConfig) -> dict[str, str]:
         query = {

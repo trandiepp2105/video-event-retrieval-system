@@ -13,7 +13,8 @@ Input visual embeddings:
 
 Input text embeddings:
 - `caption embeddings`
-- `subtitle embeddings`
+- `subtitle Meilisearch` mac dinh
+- `subtitle embeddings` giu lai de co the bat lai backend `embedding`
 - `OCR` qua Meilisearch
 
 CLI:

@@ -3,11 +3,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .build import RetrievalStoreBuilder
 from .common import load_json
 from .config import BuildConfig, SearchConfig
 from .metadata import MetadataRepository
-from .retrieval import TemporalMovieEventRetriever
 from .schemas import EventRecord, OCRRecord, ShotRecord, SubtitleRecord, VideoRecord
 
 
@@ -25,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_all.add_argument("--output_dir", type=Path, required=True)
     build_all.add_argument("--meilisearch_url", type=str, required=True)
     build_all.add_argument("--meilisearch_index_name", type=str, required=True)
+    build_all.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
     build_all.add_argument("--meilisearch_api_key", type=str, default=None)
     build_all.add_argument("--meilisearch_batch_size", type=int, default=1000)
     build_all.add_argument("--auto_start_meilisearch", action="store_true")
@@ -43,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--clip_model_path_override", type=Path, default=None)
     search.add_argument("--caption_model_path", type=str, default=None)
     search.add_argument("--subtitle_model_path", type=str, default=None)
+    search.add_argument("--subtitle_backend", type=str, default="meilisearch", choices=["meilisearch", "embedding"])
     search.add_argument("--event_top_k", type=int, default=200)
     search.add_argument("--caption_top_k", type=int, default=200)
     search.add_argument("--subtitle_top_k", type=int, default=200)
@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--subtitle_device", type=str, default="cpu")
     search.add_argument("--meilisearch_url", type=str, default=None)
     search.add_argument("--meilisearch_index_name", type=str, default=None)
+    search.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
     search.add_argument("--meilisearch_api_key", type=str, default=None)
     search.add_argument("--auto_start_meilisearch", action="store_true")
     search.add_argument("--meilisearch_binary_path", type=Path, default=None)
@@ -97,6 +98,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "build-all":
+        from .build import RetrievalStoreBuilder
+
         manifest = RetrievalStoreBuilder().build(
             BuildConfig(
                 event_dir=args.event_dir,
@@ -108,6 +111,7 @@ def main() -> None:
                 output_dir=args.output_dir,
                 meilisearch_url=args.meilisearch_url,
                 meilisearch_index_name=args.meilisearch_index_name,
+                subtitle_meilisearch_index_name=args.subtitle_meilisearch_index_name,
                 meilisearch_api_key=args.meilisearch_api_key,
                 meilisearch_batch_size=args.meilisearch_batch_size,
                 auto_start_meilisearch=args.auto_start_meilisearch,
@@ -120,6 +124,8 @@ def main() -> None:
         return
 
     if args.command == "search":
+        from .retrieval import TemporalMovieEventRetriever
+
         retriever = TemporalMovieEventRetriever(_load_metadata(args.store_dir), args.store_dir)
         result = retriever.search(
             SearchConfig(
@@ -133,6 +139,7 @@ def main() -> None:
                 clip_model_path_override=args.clip_model_path_override,
                 caption_model_path=args.caption_model_path,
                 subtitle_model_path=args.subtitle_model_path,
+                subtitle_backend=args.subtitle_backend,
                 event_top_k=args.event_top_k,
                 caption_top_k=args.caption_top_k,
                 subtitle_top_k=args.subtitle_top_k,
@@ -153,6 +160,7 @@ def main() -> None:
                 subtitle_device=args.subtitle_device,
                 meilisearch_url=args.meilisearch_url,
                 meilisearch_index_name=args.meilisearch_index_name,
+                subtitle_meilisearch_index_name=args.subtitle_meilisearch_index_name,
                 meilisearch_api_key=args.meilisearch_api_key,
                 auto_start_meilisearch=args.auto_start_meilisearch,
                 meilisearch_binary_path=args.meilisearch_binary_path,

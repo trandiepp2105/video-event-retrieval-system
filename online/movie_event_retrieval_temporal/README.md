@@ -5,7 +5,8 @@ Module nay trien khai retrieval theo 2 tang:
 1. Event-level coarse retrieval
    - event embedding FAISS
    - event caption embedding FAISS
-   - subtitle embedding FAISS
+   - subtitle Meilisearch mac dinh
+   - subtitle embedding FAISS la backend du phong
    - OCR Meilisearch
 2. Shot-level refinement
    - subset search tren shot FAISS bang `faiss.IDSelectorArray`
@@ -35,7 +36,7 @@ python event_retrieval_temporal_main.py search \
   --query_json query.json \
   --temporal_checkpoint_path ... \
   --caption_model_path ... \
-  --subtitle_model_path ... \
+  --subtitle_backend meilisearch \
   --meilisearch_url http://127.0.0.1:7700 \
   --meilisearch_index_name movie_event_ocr
 ```

@@ -20,6 +20,8 @@ from ..indexes.ocr import (
     OCRIndexConfigurator,
     OCRIndexWriter,
     OCRStore,
+    SubtitleDocumentBuilder,
+    SubtitleIndexConfigurator,
 )
 from ..mappings import MappingBundleBuilder
 from ..mappings.serializer import MappingSerializer
@@ -43,6 +45,7 @@ class RetrievalStoreBuilder:
         self.index_saver = FaissIndexSaver()
         self.mapping_serializer = MappingSerializer()
         self.ocr_document_builder = OCRDocumentBuilder()
+        self.subtitle_document_builder = SubtitleDocumentBuilder()
 
     def build(self, config: BuildConfig) -> dict:
         runtime = None
@@ -70,6 +73,7 @@ class RetrievalStoreBuilder:
             ensure_dir(config.output_dir)
             ensure_dir(config.output_dir / "indexes" / "faiss")
             ensure_dir(config.output_dir / "indexes" / "ocr")
+            ensure_dir(config.output_dir / "indexes" / "subtitle_text")
 
             print("[Build] Phase 2/6: load embedding matrices")
             event_embeddings, event_item_ids = EventEmbeddingLoader().load(config.event_embedding_dir)
@@ -119,8 +123,11 @@ class RetrievalStoreBuilder:
 
             print("[Build] Phase 6/6: build OCR documents and index with Meilisearch")
             ocr_documents = [self.ocr_document_builder.build(record) for record in metadata.ocr_items.values()]
+            subtitle_documents = [self.subtitle_document_builder.build(record) for record in metadata.subtitles.values()]
             print(f"[Build] OCR documents prepared: {len(ocr_documents)}")
+            print(f"[Build] Subtitle documents prepared: {len(subtitle_documents)}")
             OCRStore(documents=ocr_documents).save(config.output_dir / "indexes" / "ocr" / "documents.json")
+            OCRStore(documents=subtitle_documents).save(config.output_dir / "indexes" / "subtitle_text" / "documents.json")
             print("[Build] Saved OCR documents.json")
             meili_client = MeiliSearchClient(
                 base_url=config.meilisearch_url,
@@ -133,6 +140,14 @@ class RetrievalStoreBuilder:
                 ocr_documents,
             )
             print("[Build] OCR documents indexed into Meilisearch")
+            subtitle_index_name = config.subtitle_meilisearch_index_name or f"{config.meilisearch_index_name}_subtitle"
+            print(f"[Build] Configuring subtitle Meilisearch index: {subtitle_index_name}")
+            SubtitleIndexConfigurator(meili_client).configure(subtitle_index_name)
+            OCRIndexWriter(meili_client, batch_size=config.meilisearch_batch_size).add_documents(
+                subtitle_index_name,
+                subtitle_documents,
+            )
+            print("[Build] Subtitle documents indexed into Meilisearch")
             save_json(
                 {
                     "backend": "meilisearch",
@@ -145,6 +160,19 @@ class RetrievalStoreBuilder:
                     "meilisearch_db_path": None if config.meilisearch_db_path is None else str(config.meilisearch_db_path),
                 },
                 config.output_dir / "indexes" / "ocr" / "config.json",
+            )
+            save_json(
+                {
+                    "backend": "meilisearch",
+                    "url": config.meilisearch_url,
+                    "index_name": subtitle_index_name,
+                    "api_key_provided": bool(config.meilisearch_api_key),
+                    "documents_json_path": str(config.output_dir / "indexes" / "subtitle_text" / "documents.json"),
+                    "auto_start_meilisearch": config.auto_start_meilisearch,
+                    "meilisearch_binary_path": None if config.meilisearch_binary_path is None else str(config.meilisearch_binary_path),
+                    "meilisearch_db_path": None if config.meilisearch_db_path is None else str(config.meilisearch_db_path),
+                },
+                config.output_dir / "indexes" / "subtitle_text" / "config.json",
             )
 
             metadata_payload = {
@@ -162,9 +190,11 @@ class RetrievalStoreBuilder:
                 "shot_index_path": str(config.output_dir / "indexes" / "faiss" / "shot.faiss"),
                 "subtitle_index_path": str(config.output_dir / "indexes" / "faiss" / "subtitle.faiss"),
                 "ocr_documents_path": str(config.output_dir / "indexes" / "ocr" / "documents.json"),
+                "subtitle_documents_path": str(config.output_dir / "indexes" / "subtitle_text" / "documents.json"),
                 "ocr_backend": "meilisearch",
                 "meilisearch_url": config.meilisearch_url,
                 "meilisearch_index_name": config.meilisearch_index_name,
+                "subtitle_meilisearch_index_name": subtitle_index_name,
                 "num_videos": len(metadata.videos),
                 "num_events": len(metadata.events),
                 "num_shots": len(metadata.shots),

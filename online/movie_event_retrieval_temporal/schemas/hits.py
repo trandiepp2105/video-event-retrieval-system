@@ -9,6 +9,7 @@ class SearchHit:
     faiss_id: int
     score: float
     rank: int
+    text: str = ""
 
 
 @dataclass(frozen=True)

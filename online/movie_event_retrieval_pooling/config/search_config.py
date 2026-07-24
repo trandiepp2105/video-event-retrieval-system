@@ -16,6 +16,7 @@ class SearchConfig:
     clip_model_name: str = "ViT-H-14-quickgelu"
     caption_model_path: str | None = None
     subtitle_model_path: str | None = None
+    subtitle_backend: str = "meilisearch"
     event_top_k: int = 200
     caption_top_k: int = 200
     subtitle_top_k: int = 200
@@ -36,6 +37,7 @@ class SearchConfig:
     subtitle_device: str = "cpu"
     meilisearch_url: str | None = None
     meilisearch_index_name: str | None = None
+    subtitle_meilisearch_index_name: str | None = None
     meilisearch_api_key: str | None = None
     auto_start_meilisearch: bool = False
     meilisearch_binary_path: Path | None = None
