@@ -25,6 +25,9 @@ Trich xuat face continuity features va boundary-related face signals theo shot.
 6. `text_embedding`
 Embed subtitle va event caption bang Vietnamese embedding model.
 
+7. `event_boundary_detection`
+Dung cac modality o muc shot de group shot thanh event va sinh event-level outputs.
+
 2. `online/`
 Chua cac module retrieval/search phuc vu pha truy van.
 
@@ -51,6 +54,7 @@ python offline_shot_action_feature_extraction_main.py ...
 python offline_subtitle_ocr_extraction_main.py ...
 python offline_shot_face_continuity_feature_extraction_main.py ...
 python offline_text_embedding_main.py ...
+python offline_event_boundary_detection_main.py ...
 ```
 
 Khong con giu cac thu muc retrieval cung cap voi `online/` nua.
