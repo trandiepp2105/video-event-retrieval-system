@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -55,7 +56,28 @@ class MeiliSearchRuntimeManager:
         print(f"[OCR] Starting Meilisearch from binary: {binary_path}")
         print(f"[OCR] Meilisearch db path: {db_path if db_path is not None else '(default internal path)'}")
         print(f"[OCR] Meilisearch http addr: {host_port}")
-        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        stdout_target = subprocess.DEVNULL
+        stderr_target = subprocess.DEVNULL
+        if db_path is not None:
+            log_path = db_path / "meilisearch.log"
+            log_file = open(log_path, "a", encoding="utf-8")
+            stdout_target = log_file
+            stderr_target = log_file
+            print(f"[OCR] Meilisearch log path: {log_path}")
+        else:
+            log_file = None
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=stdout_target,
+            stderr=stderr_target,
+            text=True,
+            start_new_session=True,
+            close_fds=True,
+            env=os.environ.copy(),
+        )
+        if log_file is not None:
+            log_file.close()
 
         started = time.time()
         while (time.time() - started) < timeout_sec:

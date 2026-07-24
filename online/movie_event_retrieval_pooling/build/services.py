@@ -141,6 +141,12 @@ class RetrievalStoreBuilder:
                 ocr_documents,
             )
             print("[Build] OCR documents indexed into Meilisearch")
+            ocr_stats = meili_client.get_index_stats(config.meilisearch_index_name)
+            print(
+                "[Build] OCR index stats after push: "
+                f"documents={ocr_stats.get('numberOfDocuments')} "
+                f"isIndexing={ocr_stats.get('isIndexing')}"
+            )
             subtitle_index_name = config.subtitle_meilisearch_index_name or f"{config.meilisearch_index_name}_subtitle"
             print(f"[Build] Configuring subtitle Meilisearch index: {subtitle_index_name}")
             SubtitleIndexConfigurator(meili_client).configure(subtitle_index_name)
@@ -149,6 +155,12 @@ class RetrievalStoreBuilder:
                 subtitle_documents,
             )
             print("[Build] Subtitle documents indexed into Meilisearch")
+            subtitle_stats = meili_client.get_index_stats(subtitle_index_name)
+            print(
+                "[Build] Subtitle index stats after push: "
+                f"documents={subtitle_stats.get('numberOfDocuments')} "
+                f"isIndexing={subtitle_stats.get('isIndexing')}"
+            )
             print("[Build] Waiting 15s for Meilisearch indexes to settle before returning ...")
             time.sleep(15.0)
             save_json(
