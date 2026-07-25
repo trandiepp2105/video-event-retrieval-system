@@ -66,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_stage.add_argument("--meilisearch_api_key", type=str, required=True)
     search_stage.add_argument("--ocr_index_name", type=str, required=True)
     search_stage.add_argument("--subtitle_index_name", type=str, required=True)
+    search_stage.add_argument("--debug", action="store_true")
     search_stage.add_argument("--output_json", type=Path, default=None)
 
     search_temporal = subparsers.add_parser("search-temporal")
@@ -297,6 +298,7 @@ def main() -> None:
             visual_weight=args.visual_weight,
             ocr_weight=args.ocr_weight,
             subtitle_weight=args.subtitle_weight,
+            debug=args.debug,
         )
         payload = [item.to_dict() for item in results]
         _save_result_if_needed(payload, args.output_json)

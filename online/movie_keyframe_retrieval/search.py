@@ -248,6 +248,10 @@ class SearchEngine:
     def _default_channel_weights(self) -> dict[str, float]:
         return {"text": 0.4, "ocr": 0.3, "subtitle": 0.15, "image": 0.15}
 
+    @staticmethod
+    def _debug_preview(items: list[Any], limit: int = 5) -> list[Any]:
+        return items[: max(0, int(limit))]
+
     def _sanitize_stage_query(self, stage_query: Optional[dict[str, Any]]) -> dict[str, Any]:
         if not stage_query:
             return {}
@@ -514,6 +518,16 @@ class SearchEngine:
             {"text": stage_query.visual, "ocr": stage_query.ocr, "subtitle": stage_query.subtitle},
             weights,
         )
+        print(f"[StageSearch] top_k={top_k} internal_k={internal_k}")
+        print(
+            "[StageSearch] queries:",
+            {
+                "visual": stage_query.visual,
+                "ocr": stage_query.ocr,
+                "subtitle": stage_query.subtitle,
+            },
+        )
+        print(f"[StageSearch] normalized weights: {weights}")
         raw_results = {channel: [] for channel in QUERY_CHANNELS}
         vector_models_config = self._resolve_vector_models_config(None)
         vector_queries, vector_types = self._prepare_hybrid_vector_queries(
@@ -547,6 +561,35 @@ class SearchEngine:
             if future_subtitle is not None:
                 raw_results["subtitle"] = future_subtitle.result()
 
+        print(
+            "[StageSearch] raw result counts:",
+            {
+                "visual_batches": len(raw_results["text"]),
+                "ocr_hits": len(raw_results["ocr"]),
+                "subtitle_hits": len(raw_results["subtitle"]),
+            },
+        )
+        if raw_results["text"]:
+            print("[StageSearch] visual raw preview:", self._debug_preview(raw_results["text"], limit=5))
+        if raw_results["ocr"]:
+            print("[StageSearch] ocr raw preview:", self._debug_preview(raw_results["ocr"], limit=5))
+        if raw_results["subtitle"]:
+            subtitle_preview = []
+            for item in self._debug_preview(raw_results["subtitle"], limit=5):
+                mapped_keys = self._subtitle_hit_to_keys(item)
+                subtitle_preview.append(
+                    {
+                        "video_name": item.get("video_name"),
+                        "frame_start": item.get("frame_start"),
+                        "frame_end": item.get("frame_end"),
+                        "text": item.get("text"),
+                        "ranking_score": item.get("_rankingScore"),
+                        "mapped_keyframes_preview": mapped_keys[:10],
+                        "num_mapped_keyframes": len(mapped_keys),
+                    }
+                )
+            print("[StageSearch] subtitle raw preview:", subtitle_preview)
+
         fused = self._fuse_and_rerank_candidates_detailed(
             raw_text_results=raw_results["text"],
             raw_image_results=raw_results["image"],
@@ -554,6 +597,21 @@ class SearchEngine:
             raw_subtitle_results=raw_results["subtitle"],
             weights=weights,
         )
+        if fused:
+            print(
+                "[StageSearch] fused preview:",
+                [
+                    {
+                        "key": item["key"],
+                        "fused_score": item["fused_score"],
+                        "normalized_scores": item["normalized_scores"],
+                        "raw_scores": item["raw_scores"],
+                    }
+                    for item in self._debug_preview(fused, limit=10)
+                ],
+            )
+        else:
+            print("[StageSearch] fused preview: []")
         return [
             StageCandidate(
                 video_id=item["key"][0],
