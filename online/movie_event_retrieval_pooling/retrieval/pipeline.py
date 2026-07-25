@@ -24,7 +24,7 @@ from ..schemas import EventResult, ShotResult
 
 from ..config import SearchConfig
 from ..embeddings import OpenClipQueryEncoder, SentenceTransformerQueryEncoder
-from ..indexes.ocr import MeiliSearchClient, MeiliSearchRuntimeManager, OCRSearcher, SubtitleSearcher
+from ..indexes.ocr import MeiliSearchClient, OCRSearcher, SubtitleSearcher
 
 
 class PoolingMovieEventRetriever:
@@ -46,7 +46,6 @@ class PoolingMovieEventRetriever:
         query = self._load_query(config)
         visual_encoder = None
         caption_encoder = None
-        runtime = None
 
         try:
             visual_query = query["translated_query"] or query["raw_query"]
@@ -63,7 +62,7 @@ class PoolingMovieEventRetriever:
                     raise ValueError("caption_model_path is required when raw_query is provided")
                 caption_encoder = SentenceTransformerQueryEncoder(config.caption_model_path, device=config.caption_device)
             subtitle_encoder = self._build_subtitle_encoder(config, query["subtitle_query"])
-            ocr_searcher, subtitle_searcher, runtime = self._build_text_searchers(config)
+            ocr_searcher, subtitle_searcher = self._build_text_searchers(config)
 
             event_hits = []
             shot_query_vector = None
@@ -185,27 +184,12 @@ class PoolingMovieEventRetriever:
         finally:
             pass
 
-    def _build_text_searchers(self, config: SearchConfig) -> tuple[OCRSearcher, SubtitleSearcher | None, object | None]:
+    def _build_text_searchers(self, config: SearchConfig) -> tuple[OCRSearcher, SubtitleSearcher | None]:
         ocr_config_path = self.store_dir / "indexes" / "ocr" / "config.json"
         ocr_config = load_json(ocr_config_path)
         meilisearch_url = config.meilisearch_url or str(ocr_config["url"])
         meilisearch_index_name = config.meilisearch_index_name or str(ocr_config["index_name"])
         subtitle_searcher: SubtitleSearcher | None = None
-        runtime = None
-        auto_start = config.auto_start_meilisearch or bool(ocr_config.get("auto_start_meilisearch"))
-        if auto_start:
-            binary_path = config.meilisearch_binary_path
-            if binary_path is None and ocr_config.get("meilisearch_binary_path"):
-                binary_path = Path(str(ocr_config["meilisearch_binary_path"]))
-            db_path = config.meilisearch_db_path
-            if db_path is None and ocr_config.get("meilisearch_db_path"):
-                db_path = Path(str(ocr_config["meilisearch_db_path"]))
-            runtime = MeiliSearchRuntimeManager().ensure_running(
-                base_url=meilisearch_url,
-                api_key=config.meilisearch_api_key,
-                binary_path=binary_path,
-                db_path=db_path,
-            )
         client = MeiliSearchClient(
             base_url=meilisearch_url,
             api_key=config.meilisearch_api_key,
@@ -214,7 +198,7 @@ class PoolingMovieEventRetriever:
             subtitle_config = load_json(self.store_dir / "indexes" / "subtitle_text" / "config.json")
             subtitle_index_name = config.subtitle_meilisearch_index_name or str(subtitle_config["index_name"])
             subtitle_searcher = SubtitleSearcher(client=client, index_uid=subtitle_index_name)
-        return OCRSearcher(client=client, index_uid=meilisearch_index_name), subtitle_searcher, runtime
+        return OCRSearcher(client=client, index_uid=meilisearch_index_name), subtitle_searcher
 
     @staticmethod
     def _build_subtitle_encoder(config: SearchConfig, subtitle_query: str) -> SentenceTransformerQueryEncoder | None:

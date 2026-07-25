@@ -18,7 +18,4 @@ class BuildConfig:
     subtitle_meilisearch_index_name: str | None = None
     meilisearch_api_key: str | None = None
     meilisearch_batch_size: int = 250
-    auto_start_meilisearch: bool = False
-    meilisearch_binary_path: Path | None = None
-    meilisearch_db_path: Path | None = None
     overwrite: bool = False

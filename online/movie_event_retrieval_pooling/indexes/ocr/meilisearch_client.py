@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
-import socket
-import time
 from dataclasses import dataclass
 from typing import Any
-from urllib import error, request
+
+import meilisearch
 
 
 @dataclass(frozen=True)
@@ -13,22 +11,30 @@ class MeiliSearchClient:
     base_url: str
     api_key: str | None = None
     timeout_sec: int = 600
-    max_retries: int = 5
-    retry_backoff_sec: float = 2.0
+
+    def __post_init__(self) -> None:
+        client = meilisearch.Client(self.base_url, self.api_key)
+        object.__setattr__(self, "_client", client)
 
     def create_index(self, index_uid: str, primary_key: str) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            "/indexes",
-            {"uid": index_uid, "primaryKey": primary_key},
-            allow_conflict=True,
-        )
+        try:
+            task = self._client.create_index(index_uid, {"primaryKey": primary_key})
+            return self._to_dict(task)
+        except Exception as exc:
+            message = str(exc)
+            if "already exists" in message.lower() or "index_already_exists" in message.lower():
+                return {"status": 409}
+            raise
 
     def update_settings(self, index_uid: str, settings: dict[str, Any]) -> dict[str, Any]:
-        return self._request("PATCH", f"/indexes/{index_uid}/settings", settings)
+        index = self._client.index(index_uid)
+        task = index.update_settings(settings)
+        return self._to_dict(task)
 
     def add_documents(self, index_uid: str, documents: list[dict[str, Any]]) -> dict[str, Any]:
-        return self._request("POST", f"/indexes/{index_uid}/documents", documents)
+        index = self._client.index(index_uid)
+        task = index.add_documents(documents)
+        return self._to_dict(task)
 
     def search(
         self,
@@ -40,73 +46,59 @@ class MeiliSearchClient:
         attributes_to_retrieve: list[str] | None = None,
         show_ranking_score: bool | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"q": query, "limit": int(limit)}
+        payload: dict[str, Any] = {"limit": int(limit)}
         if matching_strategy is not None:
             payload["matchingStrategy"] = str(matching_strategy)
         if attributes_to_retrieve is not None:
             payload["attributesToRetrieve"] = list(attributes_to_retrieve)
         if show_ranking_score is not None:
             payload["showRankingScore"] = bool(show_ranking_score)
-        return self._request("POST", f"/indexes/{index_uid}/search", payload)
+        index = self._client.index(index_uid)
+        result = index.search(query, payload)
+        return self._to_dict(result)
 
     def get_index(self, index_uid: str) -> dict[str, Any]:
-        return self._request("GET", f"/indexes/{index_uid}")
+        index = self._client.get_index(index_uid)
+        return self._to_dict(index)
 
     def get_index_stats(self, index_uid: str) -> dict[str, Any]:
-        return self._request("GET", f"/indexes/{index_uid}/stats")
+        index = self._client.index(index_uid)
+        stats = index.get_stats()
+        return self._to_dict(stats)
 
     def get_task(self, task_uid: int) -> dict[str, Any]:
-        return self._request("GET", f"/tasks/{task_uid}")
+        task = self._client.get_task(int(task_uid))
+        return self._to_dict(task)
 
     def wait_for_task(self, task_uid: int, poll_interval_sec: float = 0.5) -> dict[str, Any]:
-        while True:
-            payload = self.get_task(task_uid)
-            status = payload.get("status")
-            if status in {"succeeded", "failed", "canceled"}:
-                return payload
-            time.sleep(poll_interval_sec)
+        task = self._client.wait_for_task(
+            int(task_uid),
+            timeout_in_ms=int(self.timeout_sec * 1000),
+            interval_in_ms=int(max(poll_interval_sec, 0.1) * 1000),
+        )
+        return self._to_dict(task)
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        payload: Any | None = None,
-        *,
-        allow_conflict: bool = False,
-    ) -> dict[str, Any]:
-        url = self.base_url.rstrip("/") + path
-        data = None
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        if payload is not None:
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        last_exception: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
-            req = request.Request(url, data=data, headers=headers, method=method)
-            try:
-                with request.urlopen(req, timeout=self.timeout_sec) as response:
-                    return json.loads(response.read().decode("utf-8"))
-            except error.HTTPError as exc:
-                if allow_conflict and exc.code == 409:
-                    body = exc.read().decode("utf-8")
-                    return json.loads(body) if body else {"status": 409}
-                body = exc.read().decode("utf-8")
-                raise RuntimeError(
-                    f"Meilisearch request failed: method={method} path={path} status={exc.code} body={body}"
-                ) from exc
-            except (TimeoutError, socket.timeout, error.URLError) as exc:
-                last_exception = exc
-                if attempt >= self.max_retries:
-                    break
-                sleep_sec = self.retry_backoff_sec * attempt
-                print(
-                    "[OCR] Meilisearch request retry "
-                    f"{attempt}/{self.max_retries} for {method} {path} after error: {exc!r}. "
-                    f"Sleep {sleep_sec:.1f}s before retry."
-                )
-                time.sleep(sleep_sec)
-        raise RuntimeError(
-            f"Khong ket noi/on dinh duoc Meilisearch tai {url} sau {self.max_retries} lan thu. "
-            f"Loi cuoi: {last_exception!r}"
-        ) from last_exception
+    @staticmethod
+    def _to_dict(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            raw = payload
+        elif hasattr(payload, "__dict__"):
+            raw = {
+                key: value
+                for key, value in vars(payload).items()
+                if not key.startswith("_")
+            }
+        elif hasattr(payload, "dict"):
+            raw = payload.dict()
+        else:
+            raise TypeError(f"Khong the chuyen doi payload sang dict: {type(payload)!r}")
+        aliases = {
+            "task_uid": "taskUid",
+            "primary_key": "primaryKey",
+            "number_of_documents": "numberOfDocuments",
+            "is_indexing": "isIndexing",
+        }
+        normalized: dict[str, Any] = {}
+        for key, value in raw.items():
+            normalized[aliases.get(key, key)] = value
+        return normalized

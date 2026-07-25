@@ -16,7 +16,6 @@ from ..embeddings import (
 from ..indexes.faiss import FaissIndexSaver, FlatIPIndexBuilder
 from ..indexes.ocr import (
     MeiliSearchClient,
-    MeiliSearchRuntimeManager,
     OCRDocumentBuilder,
     OCRIndexConfigurator,
     OCRIndexWriter,
@@ -49,20 +48,9 @@ class RetrievalStoreBuilder:
         self.subtitle_document_builder = SubtitleDocumentBuilder()
 
     def build(self, config: BuildConfig) -> dict:
-        runtime = None
         print("[Build] Start build-all for temporal event retrieval store")
         print(f"[Build] Output dir: {config.output_dir}")
-        if config.auto_start_meilisearch:
-            print("[Build] Auto-start Meilisearch is enabled")
-            runtime = MeiliSearchRuntimeManager().ensure_running(
-                base_url=config.meilisearch_url,
-                api_key=config.meilisearch_api_key,
-                binary_path=config.meilisearch_binary_path,
-                db_path=config.meilisearch_db_path,
-            )
-        else:
-            print("[Build] Auto-start Meilisearch is disabled")
-            print(f"[Build] Expect external Meilisearch at: {config.meilisearch_url}")
+        print(f"[Build] Expect running Meilisearch at: {config.meilisearch_url}")
         print("[Build] Phase 1/6: load metadata repository")
         metadata = load_metadata_repository(config)
         print(
@@ -170,9 +158,6 @@ class RetrievalStoreBuilder:
                     "index_name": config.meilisearch_index_name,
                     "api_key_provided": bool(config.meilisearch_api_key),
                     "documents_json_path": str(config.output_dir / "indexes" / "ocr" / "documents.json"),
-                    "auto_start_meilisearch": config.auto_start_meilisearch,
-                    "meilisearch_binary_path": None if config.meilisearch_binary_path is None else str(config.meilisearch_binary_path),
-                    "meilisearch_db_path": None if config.meilisearch_db_path is None else str(config.meilisearch_db_path),
                 },
                 config.output_dir / "indexes" / "ocr" / "config.json",
             )
@@ -183,9 +168,6 @@ class RetrievalStoreBuilder:
                     "index_name": subtitle_index_name,
                     "api_key_provided": bool(config.meilisearch_api_key),
                     "documents_json_path": str(config.output_dir / "indexes" / "subtitle_text" / "documents.json"),
-                    "auto_start_meilisearch": config.auto_start_meilisearch,
-                    "meilisearch_binary_path": None if config.meilisearch_binary_path is None else str(config.meilisearch_binary_path),
-                    "meilisearch_db_path": None if config.meilisearch_db_path is None else str(config.meilisearch_db_path),
                 },
                 config.output_dir / "indexes" / "subtitle_text" / "config.json",
             )
@@ -219,7 +201,6 @@ class RetrievalStoreBuilder:
             save_json(manifest, config.output_dir / "manifest.json")
             print("[Build] Manifest saved")
             print("[Build] build-all completed successfully")
-            print("[Build] Meilisearch runtime is kept online and will not be auto-shutdown")
             return manifest
         finally:
             pass

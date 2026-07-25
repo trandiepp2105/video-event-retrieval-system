@@ -23,9 +23,6 @@ def build_parser() -> argparse.ArgumentParser:
     build_all.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
     build_all.add_argument("--meilisearch_api_key", type=str, default=None)
     build_all.add_argument("--meilisearch_batch_size", type=int, default=250)
-    build_all.add_argument("--auto_start_meilisearch", action="store_true")
-    build_all.add_argument("--meilisearch_binary_path", type=Path, default=None)
-    build_all.add_argument("--meilisearch_db_path", type=Path, default=None)
     build_all.add_argument("--overwrite", action="store_true")
 
     search = subparsers.add_parser("search")
@@ -62,9 +59,6 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--meilisearch_index_name", type=str, default=None)
     search.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
     search.add_argument("--meilisearch_api_key", type=str, default=None)
-    search.add_argument("--auto_start_meilisearch", action="store_true")
-    search.add_argument("--meilisearch_binary_path", type=Path, default=None)
-    search.add_argument("--meilisearch_db_path", type=Path, default=None)
     search.add_argument("--output_json", type=Path, default=None)
     return parser
 
@@ -121,9 +115,6 @@ def main() -> None:
                 subtitle_meilisearch_index_name=args.subtitle_meilisearch_index_name,
                 meilisearch_api_key=args.meilisearch_api_key,
                 meilisearch_batch_size=args.meilisearch_batch_size,
-                auto_start_meilisearch=args.auto_start_meilisearch,
-                meilisearch_binary_path=args.meilisearch_binary_path,
-                meilisearch_db_path=args.meilisearch_db_path,
                 overwrite=args.overwrite,
             )
         )
@@ -169,9 +160,6 @@ def main() -> None:
                 meilisearch_index_name=args.meilisearch_index_name,
                 subtitle_meilisearch_index_name=args.subtitle_meilisearch_index_name,
                 meilisearch_api_key=args.meilisearch_api_key,
-                auto_start_meilisearch=args.auto_start_meilisearch,
-                meilisearch_binary_path=args.meilisearch_binary_path,
-                meilisearch_db_path=args.meilisearch_db_path,
                 output_json=args.output_json,
             )
         )
