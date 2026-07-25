@@ -63,6 +63,22 @@ def build_parser() -> argparse.ArgumentParser:
     build_all.add_argument("--meilisearch_batch_size", type=int, default=10000)
     build_all.add_argument("--overwrite", action="store_true")
 
+    build_ocr = subparsers.add_parser("build-ocr-index")
+    build_ocr.add_argument("--ocr_dir", type=Path, required=True)
+    build_ocr.add_argument("--output_dir", type=Path, required=True)
+    build_ocr.add_argument("--meilisearch_url", type=str, required=True)
+    build_ocr.add_argument("--meilisearch_index_name", type=str, required=True)
+    build_ocr.add_argument("--meilisearch_api_key", type=str, default=None)
+    build_ocr.add_argument("--meilisearch_batch_size", type=int, default=10000)
+
+    build_subtitle = subparsers.add_parser("build-subtitle-index")
+    build_subtitle.add_argument("--subtitle_dir", type=Path, required=True)
+    build_subtitle.add_argument("--output_dir", type=Path, required=True)
+    build_subtitle.add_argument("--meilisearch_url", type=str, required=True)
+    build_subtitle.add_argument("--subtitle_meilisearch_index_name", type=str, required=True)
+    build_subtitle.add_argument("--meilisearch_api_key", type=str, default=None)
+    build_subtitle.add_argument("--meilisearch_batch_size", type=int, default=10000)
+
     search = subparsers.add_parser("search")
     search.add_argument("--store_dir", type=Path, required=True)
     search.add_argument("--query_json", type=Path, default=None)
@@ -164,6 +180,46 @@ def main() -> None:
             f"  shots: {manifest.get('num_shots', 0)}\n"
             f"  subtitles: {manifest.get('num_subtitles', 0)}\n"
             f"  ocr_items: {manifest.get('num_ocr_items', 0)}"
+        )
+        return
+
+    if args.command == "build-ocr-index":
+        from .build import build_ocr_index_only
+
+        result = build_ocr_index_only(
+            output_dir=args.output_dir,
+            ocr_dir=args.ocr_dir,
+            meilisearch_url=args.meilisearch_url,
+            meilisearch_api_key=args.meilisearch_api_key,
+            meilisearch_index_name=args.meilisearch_index_name,
+            batch_size=args.meilisearch_batch_size,
+            wait_each_batch=False,
+        )
+        print(
+            "OCR index complete\n"
+            f"  output_dir: {result['output_dir']}\n"
+            f"  index_name: {result['index_name']}\n"
+            f"  documents: {result['documents']}"
+        )
+        return
+
+    if args.command == "build-subtitle-index":
+        from .build import build_subtitle_index_only
+
+        result = build_subtitle_index_only(
+            output_dir=args.output_dir,
+            subtitle_dir=args.subtitle_dir,
+            meilisearch_url=args.meilisearch_url,
+            meilisearch_api_key=args.meilisearch_api_key,
+            subtitle_index_name=args.subtitle_meilisearch_index_name,
+            batch_size=args.meilisearch_batch_size,
+            wait_each_batch=False,
+        )
+        print(
+            "Subtitle index complete\n"
+            f"  output_dir: {result['output_dir']}\n"
+            f"  index_name: {result['index_name']}\n"
+            f"  documents: {result['documents']}"
         )
         return
 

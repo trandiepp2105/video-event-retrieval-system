@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import time
 
-from ..common import ensure_dir, save_json
+from ..common import ensure_dir, load_json, save_json
 from ..config import BuildConfig
 from ..embeddings import (
     CaptionEmbeddingLoader,
@@ -35,6 +35,128 @@ def load_metadata_repository(config: BuildConfig) -> MetadataRepository:
         subtitle_embedding_dir=config.subtitle_embedding_dir,
         ocr_dir=config.ocr_dir,
     )
+
+
+def _save_meilisearch_configs(
+    *,
+    output_dir: Path,
+    meilisearch_url: str,
+    meilisearch_api_key: str | None,
+    ocr_index_name: str,
+    subtitle_index_name: str,
+) -> None:
+    save_json(
+        {
+            "backend": "meilisearch",
+            "url": meilisearch_url,
+            "index_name": ocr_index_name,
+            "api_key_provided": bool(meilisearch_api_key),
+            "documents_json_path": str(output_dir / "indexes" / "ocr" / "documents.json"),
+        },
+        output_dir / "indexes" / "ocr" / "config.json",
+    )
+    save_json(
+        {
+            "backend": "meilisearch",
+            "url": meilisearch_url,
+            "index_name": subtitle_index_name,
+            "api_key_provided": bool(meilisearch_api_key),
+            "documents_json_path": str(output_dir / "indexes" / "subtitle_text" / "documents.json"),
+        },
+        output_dir / "indexes" / "subtitle_text" / "config.json",
+    )
+
+
+def _build_ocr_documents_only(
+    *,
+    output_dir: Path,
+    ocr_dir: Path,
+    meilisearch_url: str,
+    meilisearch_api_key: str | None,
+    meilisearch_index_name: str,
+    batch_size: int = 10000,
+    wait_each_batch: bool = False,
+) -> int:
+    ensure_dir(output_dir)
+    ensure_dir(output_dir / "indexes" / "ocr")
+    ocr_documents: list[dict] = []
+    builder = OCRDocumentBuilder()
+    for json_path in sorted(ocr_dir.glob("*.json"), key=lambda path: int(path.stem)):
+        video_id = json_path.stem
+        items = load_json(json_path)
+        if not isinstance(items, list):
+            continue
+        for idx, item in enumerate(items):
+            ocr_id = f"{video_id}:{idx}"
+            timestamp_sec = item.get("time_sec")
+            if timestamp_sec is None:
+                timestamp_sec = item.get("timestamp_sec", 0.0)
+            text = str(item.get("text", item.get("text_raw", ""))).strip()
+            ocr_documents.append(
+                builder.build(
+                    OCRRecord(
+                        ocr_id=ocr_id,
+                        video_id=str(video_id),
+                        shot_id=str(item.get("shot_id", "")),
+                        event_id=str(item.get("event_id", "")),
+                        timestamp_sec=float(timestamp_sec),
+                        text_raw=text,
+                        text_clean=" ".join(text.split()),
+                        confidence=item.get("confidence"),
+                    )
+                )
+            )
+    OCRStore(documents=ocr_documents).save(output_dir / "indexes" / "ocr" / "documents.json")
+    client = MeiliSearchClient(base_url=meilisearch_url, api_key=meilisearch_api_key)
+    OCRIndexConfigurator(client).configure(meilisearch_index_name)
+    OCRIndexWriter(client, batch_size=batch_size, wait_each_batch=wait_each_batch).add_documents(
+        meilisearch_index_name,
+        ocr_documents,
+    )
+    return len(ocr_documents)
+
+
+def _build_subtitle_documents_only(
+    *,
+    output_dir: Path,
+    subtitle_dir: Path,
+    meilisearch_url: str,
+    meilisearch_api_key: str | None,
+    subtitle_index_name: str,
+    batch_size: int = 10000,
+    wait_each_batch: bool = False,
+) -> int:
+    ensure_dir(output_dir)
+    ensure_dir(output_dir / "indexes" / "subtitle_text")
+    subtitle_documents: list[dict] = []
+    builder = SubtitleDocumentBuilder()
+    for json_path in sorted(subtitle_dir.glob("*.json"), key=lambda path: int(path.stem)):
+        video_id = json_path.stem
+        items = load_json(json_path)
+        if not isinstance(items, list):
+            continue
+        for idx, item in enumerate(items):
+            subtitle_documents.append(
+                builder.build(
+                    SubtitleRecord(
+                        subtitle_id=f"{video_id}:{idx}",
+                        video_id=str(video_id),
+                        start_time_sec=float(item.get("start_time_sec", 0.0)),
+                        end_time_sec=float(item.get("end_time_sec", 0.0)),
+                        text=str(item.get("text", "")).strip(),
+                        frame_start=item.get("frame_start"),
+                        frame_end=item.get("frame_end"),
+                    )
+                )
+            )
+    OCRStore(documents=subtitle_documents).save(output_dir / "indexes" / "subtitle_text" / "documents.json")
+    client = MeiliSearchClient(base_url=meilisearch_url, api_key=meilisearch_api_key)
+    SubtitleIndexConfigurator(client).configure(subtitle_index_name)
+    OCRIndexWriter(client, batch_size=batch_size, wait_each_batch=wait_each_batch).add_documents(
+        subtitle_index_name,
+        subtitle_documents,
+    )
+    return len(subtitle_documents)
 
 
 class RetrievalStoreBuilder:
@@ -115,25 +237,12 @@ class RetrievalStoreBuilder:
                 subtitle_documents,
             )
             time.sleep(15.0)
-            save_json(
-                {
-                    "backend": "meilisearch",
-                    "url": config.meilisearch_url,
-                    "index_name": config.meilisearch_index_name,
-                    "api_key_provided": bool(config.meilisearch_api_key),
-                    "documents_json_path": str(config.output_dir / "indexes" / "ocr" / "documents.json"),
-                },
-                config.output_dir / "indexes" / "ocr" / "config.json",
-            )
-            save_json(
-                {
-                    "backend": "meilisearch",
-                    "url": config.meilisearch_url,
-                    "index_name": subtitle_index_name,
-                    "api_key_provided": bool(config.meilisearch_api_key),
-                    "documents_json_path": str(config.output_dir / "indexes" / "subtitle_text" / "documents.json"),
-                },
-                config.output_dir / "indexes" / "subtitle_text" / "config.json",
+            _save_meilisearch_configs(
+                output_dir=config.output_dir,
+                meilisearch_url=config.meilisearch_url,
+                meilisearch_api_key=config.meilisearch_api_key,
+                ocr_index_name=config.meilisearch_index_name,
+                subtitle_index_name=subtitle_index_name,
             )
 
             metadata_payload = {
@@ -174,3 +283,79 @@ class RetrievalStoreBuilder:
             return manifest
         finally:
             pass
+
+
+def build_ocr_index_only(
+    *,
+    output_dir: Path,
+    ocr_dir: Path,
+    meilisearch_url: str,
+    meilisearch_api_key: str | None,
+    meilisearch_index_name: str,
+    batch_size: int = 10000,
+    wait_each_batch: bool = False,
+) -> dict:
+    num_docs = _build_ocr_documents_only(
+        output_dir=output_dir,
+        ocr_dir=ocr_dir,
+        meilisearch_url=meilisearch_url,
+        meilisearch_api_key=meilisearch_api_key,
+        meilisearch_index_name=meilisearch_index_name,
+        batch_size=batch_size,
+        wait_each_batch=wait_each_batch,
+    )
+    subtitle_config_path = output_dir / "indexes" / "subtitle_text" / "config.json"
+    subtitle_index_name = f"{meilisearch_index_name}_subtitle"
+    if subtitle_config_path.is_file():
+        subtitle_index_name = str(load_json(subtitle_config_path).get("index_name", subtitle_index_name))
+    _save_meilisearch_configs(
+        output_dir=output_dir,
+        meilisearch_url=meilisearch_url,
+        meilisearch_api_key=meilisearch_api_key,
+        ocr_index_name=meilisearch_index_name,
+        subtitle_index_name=subtitle_index_name,
+    )
+    return {
+        "index_type": "ocr",
+        "index_name": meilisearch_index_name,
+        "documents": num_docs,
+        "output_dir": str(output_dir),
+    }
+
+
+def build_subtitle_index_only(
+    *,
+    output_dir: Path,
+    subtitle_dir: Path,
+    meilisearch_url: str,
+    meilisearch_api_key: str | None,
+    subtitle_index_name: str,
+    batch_size: int = 10000,
+    wait_each_batch: bool = False,
+) -> dict:
+    num_docs = _build_subtitle_documents_only(
+        output_dir=output_dir,
+        subtitle_dir=subtitle_dir,
+        meilisearch_url=meilisearch_url,
+        meilisearch_api_key=meilisearch_api_key,
+        subtitle_index_name=subtitle_index_name,
+        batch_size=batch_size,
+        wait_each_batch=wait_each_batch,
+    )
+    ocr_config_path = output_dir / "indexes" / "ocr" / "config.json"
+    ocr_index_name = "movie_event_pooling_ocr"
+    if ocr_config_path.is_file():
+        ocr_index_name = str(load_json(ocr_config_path).get("index_name", ocr_index_name))
+    _save_meilisearch_configs(
+        output_dir=output_dir,
+        meilisearch_url=meilisearch_url,
+        meilisearch_api_key=meilisearch_api_key,
+        ocr_index_name=ocr_index_name,
+        subtitle_index_name=subtitle_index_name,
+    )
+    return {
+        "index_type": "subtitle",
+        "index_name": subtitle_index_name,
+        "documents": num_docs,
+        "output_dir": str(output_dir),
+    }
