@@ -1,0 +1,8 @@
+faiss-cpu
+meilisearch
+numpy
+open_clip_torch
+rapidfuzz
+torch
+tqdm
+transformers

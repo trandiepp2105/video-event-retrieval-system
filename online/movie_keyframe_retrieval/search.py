@@ -1,27 +1,19 @@
 from __future__ import annotations
 
+import concurrent.futures
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
-from .encoders import E5TextEncoder, OpenClipTextEncoder
+import numpy as np
+
+from .encoders import OpenClipTextEncoder
+from .meili_search import MeiliSearchService
 from .registry import IndexRegistry
+from .reranker import Reranker
 from .schemas import SearchResult, StageQuery
 
-
-def _normalize_score_map(score_map: dict[tuple[str, int], float]) -> dict[tuple[str, int], float]:
-    if not score_map:
-        return {}
-    max_score = max(float(score) for score in score_map.values())
-    if max_score <= 0:
-        return {key: 0.0 for key in score_map}
-    return {key: float(score) / max_score for key, score in score_map.items()}
-
-
-def _range_hits_by_video(results: list[SearchResult]) -> dict[str, list[SearchResult]]:
-    grouped: dict[str, list[SearchResult]] = {}
-    for item in results:
-        grouped.setdefault(item.video_id, []).append(item)
-    return grouped
+QUERY_CHANNELS = ["text", "ocr", "subtitle", "image"]
 
 
 @dataclass
@@ -37,217 +29,622 @@ class StageCandidate:
         return asdict(self)
 
 
+class FAISSSearchEngine:
+    def __init__(
+        self,
+        list_faiss_configs: list[dict[str, Any]],
+        reranker: Optional[Reranker] = None,
+    ) -> None:
+        self.configs = {cfg["model_name"]: cfg for cfg in list_faiss_configs}
+        self.indexes = {cfg["model_name"]: cfg["index"] for cfg in list_faiss_configs}
+        self.embedders = {cfg["model_name"]: cfg["embedder"] for cfg in list_faiss_configs}
+        self.index_to_meta = {
+            cfg["model_name"]: [
+                (meta.video_id, int(meta.frame_start))
+                for meta in cfg["index"].metadata_store.get_many(cfg["index"].ids.tolist())
+            ]
+            for cfg in list_faiss_configs
+        }
+        self.reranker = reranker if reranker else Reranker()
+
+    def _search_single_model(self, model_name: str, queries: list[str], k: int):
+        if model_name not in self.indexes:
+            return [[] for _ in queries]
+        index = self.indexes[model_name]
+        embedder = self.embedders[model_name]
+        query_array = embedder.encode_batch(queries)
+        batch_results = []
+        for query_vector in query_array:
+            results = index.search(query_vector, top_k=k)
+            batch_results.append([((item.video_id, int(item.frame_start)), float(item.score)) for item in results])
+        return batch_results
+
+    def search(self, queries, models_to_search, k=100):
+        if not queries:
+            return []
+        per_model_results = {}
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(self._search_single_model, model_cfg["model_name"], queries, k): model_cfg["model_name"]
+                for model_cfg in models_to_search
+                if model_cfg["model_name"] in self.indexes
+            }
+            for future in concurrent.futures.as_completed(futures):
+                model_name = futures[future]
+                per_model_results[model_name] = future.result()
+        batch_results_per_model = list(per_model_results.values())
+        return self.reranker(batch_results_per_model=batch_results_per_model, top_k=k)
+
+
 class SearchEngine:
     def __init__(
         self,
         *,
-        registry: IndexRegistry,
-        visual_encoder: Optional[OpenClipTextEncoder] = None,
-        subtitle_encoder: Optional[E5TextEncoder] = None,
+        vector_engine: FAISSSearchEngine,
+        ocr_engine: MeiliSearchService,
     ) -> None:
-        self.registry = registry
-        self.visual_encoder = visual_encoder
-        self.subtitle_encoder = subtitle_encoder
+        self.vector_engine = vector_engine
+        self.ocr_engine = ocr_engine
+        self.video_keyframes = self._build_video_keyframes_cache()
 
-    @staticmethod
-    def _score_point_hits(results: list[SearchResult]) -> dict[tuple[str, int], float]:
-        score_map: dict[tuple[str, int], float] = {}
-        for item in results:
-            frame_idx = int(item.frame_start)
-            key = (item.video_id, frame_idx)
-            score_map[key] = max(score_map.get(key, float("-inf")), float(item.score))
-        return _normalize_score_map(score_map)
+    def _default_channel_weights(self) -> dict[str, float]:
+        return {"text": 0.4, "ocr": 0.3, "subtitle": 0.15, "image": 0.15}
 
-    @staticmethod
-    def _subtitle_support(
-        *,
-        candidate_key: tuple[str, int],
-        subtitle_hits_by_video: dict[str, list[SearchResult]],
-    ) -> float:
-        video_id, frame_idx = candidate_key
-        best_score = 0.0
-        for hit in subtitle_hits_by_video.get(video_id, []):
-            if int(hit.frame_start) <= frame_idx <= int(hit.frame_end):
-                best_score = max(best_score, float(hit.score))
-        return best_score
+    def _sanitize_stage_query(self, stage_query: Optional[dict[str, Any]]) -> dict[str, Any]:
+        if not stage_query:
+            return {}
+        cleaned = {}
+        for channel in QUERY_CHANNELS:
+            value = stage_query.get(channel)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                if value:
+                    cleaned[channel] = value
+            else:
+                cleaned[channel] = value
+        return cleaned
+
+    def _build_stage_weights(
+        self,
+        stage_query: dict[str, Any],
+        weights: Optional[dict[str, float]] = None,
+    ) -> dict[str, float]:
+        base = self._default_channel_weights()
+        if weights:
+            for channel in QUERY_CHANNELS:
+                if channel in weights:
+                    base[channel] = max(float(weights[channel]), 0.0)
+        active = {channel: base[channel] for channel in QUERY_CHANNELS if stage_query.get(channel)}
+        normalized = {channel: 0.0 for channel in QUERY_CHANNELS}
+        if not active:
+            return normalized
+        total = sum(active.values())
+        if total > 0:
+            for channel, value in active.items():
+                normalized[channel] = value / total
+        else:
+            equal_weight = 1.0 / len(active)
+            for channel in active:
+                normalized[channel] = equal_weight
+        return normalized
+
+    def _build_video_keyframes_cache(self) -> dict[str, np.ndarray]:
+        by_video = defaultdict(set)
+        for meta_list in getattr(self.vector_engine, "index_to_meta", {}).values():
+            for video_name, frame_idx in meta_list:
+                by_video[video_name].add(int(frame_idx))
+        return {
+            video_name: np.array(sorted(frame_indices), dtype=np.int32)
+            for video_name, frame_indices in by_video.items()
+        }
+
+    def _get_keyframes_in_range(self, video_name: str, frame_start: int, frame_end: int) -> np.ndarray:
+        keyframes = self.video_keyframes.get(video_name)
+        if keyframes is None or keyframes.size == 0:
+            return np.array([], dtype=np.int32)
+        left = np.searchsorted(keyframes, frame_start, side="left")
+        right = np.searchsorted(keyframes, frame_end, side="right")
+        return keyframes[left:right]
+
+    def _get_nearest_keyframe(self, video_name: str, target_frame: float) -> Optional[int]:
+        keyframes = self.video_keyframes.get(video_name)
+        if keyframes is None or keyframes.size == 0:
+            return None
+        pos = np.searchsorted(keyframes, target_frame, side="left")
+        candidates = []
+        if pos < keyframes.size:
+            candidates.append(int(keyframes[pos]))
+        if pos > 0:
+            candidates.append(int(keyframes[pos - 1]))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda frame_idx: abs(frame_idx - target_frame))
+
+    def _subtitle_hit_to_keys(self, subtitle_hit: dict[str, Any]) -> list[tuple[str, int]]:
+        video_name = subtitle_hit.get("video_name", "")
+        frame_start = subtitle_hit.get("frame_start", -1)
+        frame_end = subtitle_hit.get("frame_end", -1)
+        if not video_name or frame_start in [None, -1] or frame_end in [None, -1]:
+            return []
+        frame_start = int(frame_start)
+        frame_end = int(frame_end)
+        if frame_end < frame_start:
+            frame_start, frame_end = frame_end, frame_start
+        matched_keyframes = self._get_keyframes_in_range(video_name, frame_start, frame_end)
+        if matched_keyframes.size > 0:
+            return [(video_name, int(frame_idx)) for frame_idx in matched_keyframes.tolist()]
+        center_frame = (frame_start + frame_end) / 2.0
+        nearest_keyframe = self._get_nearest_keyframe(video_name, center_frame)
+        if nearest_keyframe is None:
+            return []
+        return [(video_name, nearest_keyframe)]
+
+    def _fuse_and_rerank_candidates(
+        self,
+        raw_text_results: list[tuple[tuple[str, int], float]],
+        raw_image_results: list[tuple[tuple[str, int], float]],
+        raw_ocr_results: list[dict[str, Any]],
+        raw_subtitle_results: list[dict[str, Any]],
+        weights: dict[str, float],
+    ) -> list[tuple[tuple[str, int], float]]:
+        all_scores = defaultdict(lambda: {channel: 0.0 for channel in QUERY_CHANNELS})
+        for key, score in raw_text_results:
+            all_scores[key]["text"] = score
+        for key, score in raw_image_results:
+            all_scores[key]["image"] = score
+        for ocr_hit in raw_ocr_results:
+            video_name = ocr_hit.get("video_name", "")
+            frame_index = ocr_hit.get("frame_index", -1)
+            ocr_score = ocr_hit.get("_rankingScore", 0.0)
+            if video_name and frame_index != -1:
+                key = (video_name, int(frame_index))
+                all_scores[key]["ocr"] = max(all_scores[key]["ocr"], ocr_score)
+        for subtitle_hit in raw_subtitle_results:
+            subtitle_score = subtitle_hit.get("_rankingScore", 0.0)
+            for key in self._subtitle_hit_to_keys(subtitle_hit):
+                all_scores[key]["subtitle"] = max(all_scores[key]["subtitle"], subtitle_score)
+        if not all_scores:
+            return []
+        max_map = {
+            channel: max((scores[channel] for scores in all_scores.values() if scores[channel] > 0), default=0.0)
+            for channel in QUERY_CHANNELS
+        }
+        temp_combined_results = []
+        for key, scores in all_scores.items():
+            normalized_scores = {}
+            for channel in QUERY_CHANNELS:
+                max_val = max_map[channel]
+                raw_score = scores[channel]
+                if raw_score == 0:
+                    normalized_scores[channel] = 0.0
+                elif max_val > 0:
+                    normalized_scores[channel] = raw_score / max_val
+                else:
+                    normalized_scores[channel] = 1.0
+            fusion_score = sum(weights.get(channel, 0.0) * normalized_scores[channel] for channel in QUERY_CHANNELS)
+            if fusion_score > 0:
+                temp_combined_results.append((key, fusion_score))
+        if not temp_combined_results:
+            return []
+        max_fusion_score = max(score for _, score in temp_combined_results)
+        final_results = []
+        for key, score in temp_combined_results:
+            normalized_fusion_score = score / max_fusion_score if max_fusion_score > 0 else (1.0 if score > 0 else 0.0)
+            final_results.append((key, normalized_fusion_score))
+        final_results.sort(key=lambda item: item[1], reverse=True)
+        return final_results
+
+    def _resolve_vector_models_config(self, vector_models_config):
+        if vector_models_config is not None:
+            return vector_models_config
+        model_names = list(self.vector_engine.configs.keys())
+        return [{"model_name": model_name} for model_name in model_names]
+
+    def _prepare_hybrid_vector_queries(
+        self,
+        text_query: Optional[str] = None,
+        image_query: Any = None,
+    ) -> tuple[list[Any], list[str]]:
+        vector_queries = []
+        vector_types = []
+        if text_query:
+            vector_queries.append(text_query)
+            vector_types.append("text")
+        if image_query:
+            vector_queries.append(image_query)
+            vector_types.append("image")
+        return vector_queries, vector_types
+
+    def hybrid_search(
+        self,
+        text_query=None,
+        image_query=None,
+        ocr_query=None,
+        subtitle_query=None,
+        k: int = 100,
+        weights=None,
+        vector_models_config=None,
+    ):
+        if weights is None:
+            weights = self._default_channel_weights()
+        vector_models_config = self._resolve_vector_models_config(vector_models_config)
+        raw_results = {channel: [] for channel in QUERY_CHANNELS}
+        vector_queries, vector_types = self._prepare_hybrid_vector_queries(
+            text_query=text_query,
+            image_query=image_query,
+        )
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_vector = executor.submit(
+                self.vector_engine.search,
+                vector_queries,
+                vector_models_config,
+                k,
+            ) if vector_queries else None
+            future_subtitle = executor.submit(self.ocr_engine.search_subtitle, subtitle_query, k) if subtitle_query else None
+            future_ocr = executor.submit(self.ocr_engine.search_ocr, ocr_query, k) if ocr_query else None
+
+            if future_vector is not None:
+                batch_vector_results = future_vector.result()
+                for channel, results in zip(vector_types, batch_vector_results):
+                    raw_results[channel] = results
+            if future_ocr is not None:
+                raw_results["ocr"] = future_ocr.result()
+            if future_subtitle is not None:
+                raw_results["subtitle"] = future_subtitle.result()
+
+        combined_results = self._fuse_and_rerank_candidates(
+            raw_text_results=raw_results["text"],
+            raw_image_results=raw_results["image"],
+            raw_ocr_results=raw_results["ocr"],
+            raw_subtitle_results=raw_results["subtitle"],
+            weights=weights,
+        )
+        return combined_results[:k]
 
     def stage_search(
         self,
         stage_query: StageQuery,
         *,
         top_k: int = 100,
-        visual_top_k: int = 300,
-        ocr_top_k: int = 300,
-        subtitle_top_k: int = 300,
         visual_weight: float = 0.45,
         ocr_weight: float = 0.35,
         subtitle_weight: float = 0.20,
-        allow_subtitle_only: bool = False,
     ) -> list[StageCandidate]:
-        visual_hits: list[SearchResult] = []
-        subtitle_hits: list[SearchResult] = []
-        ocr_hits: list[SearchResult] = []
+        weights = {"text": visual_weight, "ocr": ocr_weight, "subtitle": subtitle_weight, "image": 0.0}
+        weights = self._build_stage_weights(
+            {"text": stage_query.visual, "ocr": stage_query.ocr, "subtitle": stage_query.subtitle},
+            weights,
+        )
+        fused = self.hybrid_search(
+            text_query=stage_query.visual or None,
+            ocr_query=stage_query.ocr or None,
+            subtitle_query=stage_query.subtitle or None,
+            k=top_k,
+            weights=weights,
+        )
+        return [
+            StageCandidate(video_id=video_id, frame_idx=frame_idx, fused_score=float(score))
+            for (video_id, frame_idx), score in fused
+        ]
 
-        if stage_query.visual:
-            if self.visual_encoder is None:
-                raise ValueError("visual_encoder is required when stage_query.visual is provided")
-            visual_index = self.registry.get("visual")
-            q_visual = self.visual_encoder.encode_texts([stage_query.visual])[0]
-            visual_hits = visual_index.search(q_visual, top_k=visual_top_k)
+    def _group_temporal_candidates(self, temporal_candidates, frame_distance: int):
+        temporal_groups = []
+        for candidate in temporal_candidates:
+            info = candidate[0]
+            video, frame = info
+            if (
+                not temporal_groups
+                or video != temporal_groups[-1][-1][0][0]
+                or frame - temporal_groups[-1][-1][0][1] > frame_distance
+            ):
+                temporal_groups.append([])
+            if temporal_groups[-1] and frame == temporal_groups[-1][-1][0][1]:
+                prev_info, prev_scores, prev_key = temporal_groups[-1][-1]
+                merged_scores = tuple(a + b for a, b in zip(prev_scores, candidate[1]))
+                temporal_groups[-1][-1] = (prev_info, merged_scores, prev_key)
+            else:
+                temporal_groups[-1].append(candidate)
+        return temporal_groups
 
-        if stage_query.subtitle:
-            if self.subtitle_encoder is None:
-                raise ValueError("subtitle_encoder is required when stage_query.subtitle is provided")
-            subtitle_index = self.registry.get("subtitle")
-            q_subtitle = self.subtitle_encoder.encode_queries([stage_query.subtitle])[0]
-            subtitle_hits = subtitle_index.search(q_subtitle, top_k=subtitle_top_k)
-
-        if stage_query.ocr:
-            ocr_index = self.registry.get("ocr")
-            ocr_hits = ocr_index.search(stage_query.ocr, top_k=ocr_top_k)
-
-        visual_scores = self._score_point_hits(visual_hits)
-        ocr_scores = self._score_point_hits(ocr_hits)
-        subtitle_hits_by_video = _range_hits_by_video(subtitle_hits)
-
-        candidate_keys = set(visual_scores.keys()) | set(ocr_scores.keys())
-        if allow_subtitle_only and not candidate_keys:
-            for hit in subtitle_hits:
-                candidate_keys.add((hit.video_id, (int(hit.frame_start) + int(hit.frame_end)) // 2))
-
-        subtitle_support_raw = {
-            key: self._subtitle_support(candidate_key=key, subtitle_hits_by_video=subtitle_hits_by_video)
-            for key in candidate_keys
-        }
-        subtitle_scores = _normalize_score_map(subtitle_support_raw)
-
-        candidates: list[StageCandidate] = []
-        for video_id, frame_idx in candidate_keys:
-            visual_score = float(visual_scores.get((video_id, frame_idx), 0.0))
-            ocr_score = float(ocr_scores.get((video_id, frame_idx), 0.0))
-            subtitle_score = float(subtitle_scores.get((video_id, frame_idx), 0.0))
-            fused_score = (
-                float(visual_weight) * visual_score
-                + float(ocr_weight) * ocr_score
-                + float(subtitle_weight) * subtitle_score
+    def _build_segment_timeline(self, temporal_group):
+        timeline = []
+        for info, stage_scores, key in temporal_group:
+            video_name, frame_index = info
+            timeline.append(
+                {
+                    "video_name": video_name,
+                    "frame_index": frame_index,
+                    "stage_scores": stage_scores,
+                    "key": key,
+                }
             )
-            candidates.append(
-                StageCandidate(
-                    video_id=video_id,
-                    frame_idx=int(frame_idx),
-                    fused_score=float(fused_score),
-                    visual_score=visual_score,
-                    ocr_score=ocr_score,
-                    subtitle_score=subtitle_score,
+        return timeline
+
+    def _aggregate_stage_scores_over_windows(self, timeline, num_stages, window_size_frames=100):
+        aggregated = []
+        for center_item in timeline:
+            center_frame_index = center_item["frame_index"]
+            aggregated_scores = []
+            for stage_idx in range(num_stages):
+                best_score = 0.0
+                best_key = None
+                best_frame_index = None
+                for neighbor in timeline:
+                    if abs(neighbor["frame_index"] - center_frame_index) <= window_size_frames:
+                        candidate_score = neighbor["stage_scores"][stage_idx]
+                        if candidate_score > best_score:
+                            best_score = candidate_score
+                            best_key = neighbor["key"]
+                            best_frame_index = neighbor["frame_index"]
+                aggregated_scores.append(
+                    {"score": best_score, "key": best_key, "frame_index": best_frame_index}
                 )
+            aggregated.append(
+                {
+                    "video_name": center_item["video_name"],
+                    "center_frame_index": center_frame_index,
+                    "stage_supports": aggregated_scores,
+                }
             )
+        return aggregated
 
-        candidates.sort(key=lambda item: item.fused_score, reverse=True)
-        return candidates[: int(top_k)]
+    def _soft_temporal_dp(self, aggregated_timeline, num_stages, lambda_skip=0.7, min_stage_gap: int = 30):
+        num_points = len(aggregated_timeline)
+        best_score = [[0.0] * num_stages for _ in range(num_points)]
+        decision = [[None] * num_stages for _ in range(num_points)]
+        prev_state = [[None] * num_stages for _ in range(num_points)]
+        last_key = [[None] * num_stages for _ in range(num_points)]
+        last_frame = [[None] * num_stages for _ in range(num_points)]
+        for time_idx in range(num_points):
+            for stage_idx in range(num_stages):
+                support = aggregated_timeline[time_idx]["stage_supports"][stage_idx]
+                current_score = support["score"]
+                current_key = support["key"]
+                current_frame = support["frame_index"]
+                if current_score > 0 and current_key is not None and current_frame is not None:
+                    best_score[time_idx][stage_idx] = current_score
+                    decision[time_idx][stage_idx] = "start"
+                    last_key[time_idx][stage_idx] = current_key
+                    last_frame[time_idx][stage_idx] = current_frame
+                else:
+                    decision[time_idx][stage_idx] = "empty"
+
+                if time_idx > 0 and best_score[time_idx - 1][stage_idx] > best_score[time_idx][stage_idx]:
+                    best_score[time_idx][stage_idx] = best_score[time_idx - 1][stage_idx]
+                    decision[time_idx][stage_idx] = "carry"
+                    prev_state[time_idx][stage_idx] = (time_idx - 1, stage_idx)
+                    last_key[time_idx][stage_idx] = last_key[time_idx - 1][stage_idx]
+                    last_frame[time_idx][stage_idx] = last_frame[time_idx - 1][stage_idx]
+
+                if time_idx > 0 and stage_idx > 0 and current_score > 0 and current_key is not None and current_frame is not None:
+                    prev_t = time_idx - 1
+                    prev_s = stage_idx - 1
+                    previous_score = best_score[prev_t][prev_s]
+                    previous_frame = last_frame[prev_t][prev_s]
+                    if previous_score > 0 and previous_frame is not None and current_frame - previous_frame >= min_stage_gap:
+                        transition_score = previous_score + current_score
+                        if transition_score > best_score[time_idx][stage_idx]:
+                            best_score[time_idx][stage_idx] = transition_score
+                            decision[time_idx][stage_idx] = "transition"
+                            prev_state[time_idx][stage_idx] = (prev_t, prev_s)
+                            last_key[time_idx][stage_idx] = current_key
+                            last_frame[time_idx][stage_idx] = current_frame
+
+                if stage_idx > 0:
+                    best_previous_stage_score = 0.0
+                    best_previous_stage_state = None
+                    for previous_time_idx in range(time_idx + 1):
+                        if best_score[previous_time_idx][stage_idx - 1] > best_previous_stage_score:
+                            best_previous_stage_score = best_score[previous_time_idx][stage_idx - 1]
+                            best_previous_stage_state = (previous_time_idx, stage_idx - 1)
+                    skip_score = lambda_skip * best_previous_stage_score
+                    if skip_score > best_score[time_idx][stage_idx] and best_previous_stage_state is not None:
+                        prev_t, prev_s = best_previous_stage_state
+                        best_score[time_idx][stage_idx] = skip_score
+                        decision[time_idx][stage_idx] = "skip"
+                        prev_state[time_idx][stage_idx] = best_previous_stage_state
+                        last_key[time_idx][stage_idx] = last_key[prev_t][prev_s]
+                        last_frame[time_idx][stage_idx] = last_frame[prev_t][prev_s]
+        return best_score, decision, prev_state
+
+    def _is_valid_temporal_chain(self, chain, min_stage_gap: int = 30):
+        if len(chain) <= 1:
+            return True
+        seen_keys = set()
+        previous_video_name = None
+        previous_frame_index = None
+        for key, _stage_scores, _matched_stage_idx in chain:
+            if key in seen_keys:
+                return False
+            seen_keys.add(key)
+            video_name, frame_index = key
+            if previous_video_name is not None and video_name != previous_video_name:
+                return False
+            if previous_frame_index is not None and frame_index - previous_frame_index < min_stage_gap:
+                return False
+            previous_video_name = video_name
+            previous_frame_index = frame_index
+        return True
 
     def temporal_search(
         self,
-        stage_queries: list[StageQuery],
-        *,
-        top_k: int = 20,
-        per_stage_top_k: int = 100,
-        visual_top_k: int = 300,
-        ocr_top_k: int = 300,
-        subtitle_top_k: int = 300,
-        visual_weight: float = 0.45,
-        ocr_weight: float = 0.35,
-        subtitle_weight: float = 0.20,
-    ) -> list[dict[str, Any]]:
-        if not stage_queries:
+        queries: Optional[list[dict[str, Any]]] = None,
+        k: int = 10,
+        frame_distance: int = 1500,
+        initial_search_k: int = 2048,
+        weights: Optional[dict[str, float]] = None,
+        vector_models_config: Optional[list[dict[str, Any]]] = None,
+        window_size_frames: int = 100,
+        lambda_skip: float = 0.7,
+        min_stage_gap: int = 30,
+    ):
+        cleaned_queries = []
+        for stage_query in queries or []:
+            cleaned = self._sanitize_stage_query(stage_query)
+            if cleaned:
+                cleaned_queries.append(cleaned)
+        if not cleaned_queries:
             return []
-        stage_candidates = [
-            self.stage_search(
-                stage_query=stage_query,
-                top_k=per_stage_top_k,
-                visual_top_k=visual_top_k,
-                ocr_top_k=ocr_top_k,
-                subtitle_top_k=subtitle_top_k,
-                visual_weight=visual_weight,
-                ocr_weight=ocr_weight,
-                subtitle_weight=subtitle_weight,
+        vector_models_config = self._resolve_vector_models_config(vector_models_config)
+        num_stages = len(cleaned_queries)
+        if num_stages <= 1:
+            stage_query = cleaned_queries[0]
+            stage_weights = self._build_stage_weights(stage_query, weights)
+            results = self.hybrid_search(
+                text_query=stage_query.get("text"),
+                image_query=stage_query.get("image"),
+                ocr_query=stage_query.get("ocr"),
+                subtitle_query=stage_query.get("subtitle"),
+                k=initial_search_k,
+                weights=stage_weights,
+                vector_models_config=vector_models_config,
             )
-            for stage_query in stage_queries
+            return results[:k] if results else []
+
+        vector_requests = []
+        ocr_queries_to_process = []
+        subtitle_queries_to_process = []
+        for stage_idx, stage_data in enumerate(cleaned_queries):
+            if stage_data.get("text"):
+                vector_requests.append({"stage_idx": stage_idx, "channel": "text", "query": stage_data["text"]})
+            if stage_data.get("image"):
+                vector_requests.append({"stage_idx": stage_idx, "channel": "image", "query": stage_data["image"]})
+            if stage_data.get("ocr"):
+                ocr_queries_to_process.append((stage_idx, stage_data["ocr"]))
+            if stage_data.get("subtitle"):
+                subtitle_queries_to_process.append((stage_idx, stage_data["subtitle"]))
+
+        vector_queries_to_process = [request["query"] for request in vector_requests]
+        batch_vector_results = []
+        ocr_results_by_stage = defaultdict(list)
+        subtitle_results_by_stage = defaultdict(list)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_vector = executor.submit(
+                self.vector_engine.search,
+                vector_queries_to_process,
+                vector_models_config,
+                initial_search_k,
+            ) if vector_queries_to_process else None
+            future_ocr = {
+                executor.submit(self.ocr_engine.search_ocr, ocr_text, 1024): stage_idx
+                for stage_idx, ocr_text in ocr_queries_to_process
+            }
+            future_subtitle = {
+                executor.submit(self.ocr_engine.search_subtitle, subtitle_text, 1024): stage_idx
+                for stage_idx, subtitle_text in subtitle_queries_to_process
+            }
+            if future_vector is not None:
+                batch_vector_results = future_vector.result()
+            for future in concurrent.futures.as_completed(future_ocr):
+                stage_idx = future_ocr[future]
+                ocr_results_by_stage[stage_idx] = future.result()
+            for future in concurrent.futures.as_completed(future_subtitle):
+                stage_idx = future_subtitle[future]
+                subtitle_results_by_stage[stage_idx] = future.result()
+
+        raw_results_by_stage = defaultdict(lambda: {channel: [] for channel in QUERY_CHANNELS})
+        for request, results in zip(vector_requests, batch_vector_results):
+            raw_results_by_stage[request["stage_idx"]][request["channel"]] = results
+        for stage_idx, results in ocr_results_by_stage.items():
+            raw_results_by_stage[stage_idx]["ocr"] = results
+        for stage_idx, results in subtitle_results_by_stage.items():
+            raw_results_by_stage[stage_idx]["subtitle"] = results
+
+        candidate_map = defaultdict(lambda: {"scores": [0.0] * num_stages, "info": None, "key": None})
+        for stage_idx in range(num_stages):
+            stage_data = raw_results_by_stage[stage_idx]
+            stage_weights = self._build_stage_weights(cleaned_queries[stage_idx], weights)
+            reranked_results = self._fuse_and_rerank_candidates(
+                stage_data["text"],
+                stage_data["image"],
+                stage_data["ocr"],
+                stage_data["subtitle"],
+                stage_weights,
+            )
+            for key, score in reranked_results:
+                candidate_map[key]["scores"][stage_idx] = score
+                if candidate_map[key]["info"] is None:
+                    video_name, frame_id = key
+                    candidate_map[key]["info"] = (video_name, frame_id)
+                    candidate_map[key]["key"] = key
+
+        temporal_candidates = [
+            (item["info"], tuple(item["scores"]), item["key"])
+            for item in candidate_map.values()
+            if item["info"] is not None
         ]
-        if any(not items for items in stage_candidates):
+        if not temporal_candidates:
             return []
-
-        all_video_ids = sorted({candidate.video_id for items in stage_candidates for candidate in items})
-        chains: list[dict[str, Any]] = []
-
-        for video_id in all_video_ids:
-            per_stage_video_candidates = [
-                [candidate for candidate in items if candidate.video_id == video_id]
-                for items in stage_candidates
-            ]
-            if any(not items for items in per_stage_video_candidates):
+        temporal_candidates.sort(key=lambda item: (item[0][0], item[0][1]))
+        temporal_groups = self._group_temporal_candidates(temporal_candidates, frame_distance)
+        final_chains = []
+        for temporal_group in temporal_groups:
+            if not temporal_group:
                 continue
-
-            dp_scores: list[list[float]] = []
-            dp_prev: list[list[Optional[int]]] = []
-
-            first_stage = sorted(per_stage_video_candidates[0], key=lambda item: item.frame_idx)
-            dp_scores.append([candidate.fused_score for candidate in first_stage])
-            dp_prev.append([None for _ in first_stage])
-
-            stage_lists = [first_stage]
-            for stage_idx in range(1, len(per_stage_video_candidates)):
-                current_items = sorted(per_stage_video_candidates[stage_idx], key=lambda item: item.frame_idx)
-                prev_items = stage_lists[-1]
-                prev_scores = dp_scores[-1]
-                current_scores = [float("-inf")] * len(current_items)
-                current_prev: list[Optional[int]] = [None] * len(current_items)
-                for curr_idx, curr in enumerate(current_items):
-                    best_score = float("-inf")
-                    best_prev_idx: Optional[int] = None
-                    for prev_idx, prev in enumerate(prev_items):
-                        if prev.frame_idx >= curr.frame_idx:
-                            continue
-                        score = prev_scores[prev_idx] + curr.fused_score
-                        if score > best_score:
-                            best_score = score
-                            best_prev_idx = prev_idx
-                    current_scores[curr_idx] = best_score
-                    current_prev[curr_idx] = best_prev_idx
-                stage_lists.append(current_items)
-                dp_scores.append(current_scores)
-                dp_prev.append(current_prev)
-
-            last_scores = dp_scores[-1]
-            for last_idx, total_score in enumerate(last_scores):
-                if total_score == float("-inf"):
+            timeline = self._build_segment_timeline(temporal_group)
+            aggregated_timeline = self._aggregate_stage_scores_over_windows(
+                timeline=timeline,
+                num_stages=num_stages,
+                window_size_frames=window_size_frames,
+            )
+            best_score, decision, prev_state = self._soft_temporal_dp(
+                aggregated_timeline=aggregated_timeline,
+                num_stages=num_stages,
+                lambda_skip=lambda_skip,
+                min_stage_gap=min_stage_gap,
+            )
+            best_final_score = 0.0
+            best_final_stage = -1
+            best_final_time_idx = -1
+            for time_idx in range(len(aggregated_timeline)):
+                for stage_idx in range(num_stages):
+                    if best_score[time_idx][stage_idx] > best_final_score:
+                        best_final_score = best_score[time_idx][stage_idx]
+                        best_final_stage = stage_idx
+                        best_final_time_idx = time_idx
+            if best_final_stage == -1 or best_final_score <= 0:
+                continue
+            chain = []
+            skipped_stages = 0
+            state = (best_final_time_idx, best_final_stage)
+            while state is not None:
+                time_idx, stage_idx = state
+                action = decision[time_idx][stage_idx]
+                if action == "carry":
+                    state = prev_state[time_idx][stage_idx]
                     continue
-                chain_items: list[dict[str, Any]] = []
-                cursor = last_idx
-                valid = True
-                for stage_idx in range(len(stage_lists) - 1, -1, -1):
-                    item = stage_lists[stage_idx][cursor]
-                    chain_items.append(
-                        {
-                            "stage_index": stage_idx,
-                            **item.to_dict(),
-                        }
-                    )
-                    prev_cursor = dp_prev[stage_idx][cursor]
-                    if stage_idx > 0 and prev_cursor is None:
-                        valid = False
-                        break
-                    if prev_cursor is not None:
-                        cursor = prev_cursor
-                if not valid:
+                if action == "skip":
+                    skipped_stages += 1
+                    state = prev_state[time_idx][stage_idx]
                     continue
-                chain_items.reverse()
-                chains.append(
+                if action in ("start", "transition"):
+                    support = aggregated_timeline[time_idx]["stage_supports"][stage_idx]
+                    if support["key"] is not None and support["score"] > 0:
+                        stage_score_vector = tuple(
+                            stage_support["score"]
+                            for stage_support in aggregated_timeline[time_idx]["stage_supports"]
+                        )
+                        chain.append((support["key"], stage_score_vector, stage_idx))
+                    state = prev_state[time_idx][stage_idx]
+                    continue
+                break
+            chain.reverse()
+            if chain and self._is_valid_temporal_chain(chain, min_stage_gap=min_stage_gap):
+                final_chains.append(
                     {
-                        "video_id": video_id,
-                        "total_score": float(total_score),
-                        "stages": chain_items,
+                        "chain": chain,
+                        "score": best_final_score,
+                        "num_stages_matched": len(chain),
+                        "num_stages_skipped": skipped_stages,
                     }
                 )
-
-        chains.sort(key=lambda item: item["total_score"], reverse=True)
-        return chains[: int(top_k)]
+        final_chains.sort(key=lambda item: (item["num_stages_matched"], item["score"]), reverse=True)
+        output_results = []
+        for item in final_chains[:k]:
+            formatted_chain = []
+            for key, stage_scores, matched_stage_idx in item["chain"]:
+                formatted_chain.append((key, (stage_scores, item["score"], matched_stage_idx)))
+            output_results.append(formatted_chain)
+        return output_results

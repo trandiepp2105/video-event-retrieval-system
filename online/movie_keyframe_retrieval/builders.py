@@ -37,6 +37,7 @@ def _finalize_faiss_index(
 @dataclass
 class VisualIndexBuilder:
     keyframe_embedding_dir: Path
+    index_name: str = "visual"
 
     def build(self) -> FaissIndex:
         vectors: List[np.ndarray] = []
@@ -75,12 +76,12 @@ class VisualIndexBuilder:
 
         dim = int(vectors[0].shape[0])
         return _finalize_faiss_index(
-            index_name="visual",
+            index_name=self.index_name,
             vectors=vectors,
             ids=ids,
             metadata_store=store,
             config={
-                "index_name": "visual",
+                "index_name": self.index_name,
                 "metric": "cosine",
                 "index_type": "IndexFlatIP",
                 "normalized": True,

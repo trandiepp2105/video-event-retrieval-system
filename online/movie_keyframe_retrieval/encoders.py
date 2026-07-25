@@ -38,6 +38,9 @@ class OpenClipTextEncoder:
             embeddings = self.model.encode_text(tokens).float().cpu().numpy().astype(np.float32)
         return l2_normalize(embeddings)
 
+    def encode_batch(self, texts: List[str]) -> np.ndarray:
+        return self.encode_texts(texts)
+
 
 class E5TextEncoder:
     def __init__(
