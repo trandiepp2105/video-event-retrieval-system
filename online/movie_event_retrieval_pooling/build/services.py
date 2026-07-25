@@ -122,9 +122,20 @@ class RetrievalStoreBuilder:
                 base_url=config.meilisearch_url,
                 api_key=config.meilisearch_api_key,
             )
+            effective_batch_size = 10000
+            effective_wait_each_batch = False
+            print(
+                "[Build] Meilisearch document push config: "
+                f"batch_size={effective_batch_size}, "
+                f"wait_each_batch={effective_wait_each_batch}"
+            )
             print(f"[Build] Configuring Meilisearch index: {config.meilisearch_index_name}")
             OCRIndexConfigurator(meili_client).configure(config.meilisearch_index_name)
-            OCRIndexWriter(meili_client, batch_size=config.meilisearch_batch_size).add_documents(
+            OCRIndexWriter(
+                meili_client,
+                batch_size=effective_batch_size,
+                wait_each_batch=effective_wait_each_batch,
+            ).add_documents(
                 config.meilisearch_index_name,
                 ocr_documents,
             )
@@ -138,7 +149,11 @@ class RetrievalStoreBuilder:
             subtitle_index_name = config.subtitle_meilisearch_index_name or f"{config.meilisearch_index_name}_subtitle"
             print(f"[Build] Configuring subtitle Meilisearch index: {subtitle_index_name}")
             SubtitleIndexConfigurator(meili_client).configure(subtitle_index_name)
-            OCRIndexWriter(meili_client, batch_size=config.meilisearch_batch_size).add_documents(
+            OCRIndexWriter(
+                meili_client,
+                batch_size=effective_batch_size,
+                wait_each_batch=effective_wait_each_batch,
+            ).add_documents(
                 subtitle_index_name,
                 subtitle_documents,
             )

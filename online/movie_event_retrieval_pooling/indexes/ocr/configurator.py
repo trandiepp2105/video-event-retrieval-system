@@ -8,7 +8,7 @@ class OCRIndexConfigurator:
         self.client = client
 
     def configure(self, index_uid: str) -> None:
-        self.client.create_index(index_uid=index_uid, primary_key="ocr_id")
+        self.client.create_index(index_uid=index_uid, primary_key="id")
         task = self.client.update_settings(
             index_uid=index_uid,
             settings={
@@ -22,6 +22,7 @@ class OCRIndexConfigurator:
                 "searchableAttributes": ["text_clean", "text_raw"],
                 "filterableAttributes": ["video_id", "event_id", "shot_id"],
                 "displayedAttributes": [
+                    "id",
                     "ocr_id",
                     "video_id",
                     "event_id",

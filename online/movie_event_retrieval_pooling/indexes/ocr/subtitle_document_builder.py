@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from ...schemas import SubtitleRecord
+from .document_builder import make_meilisearch_safe_id
 
 
 class SubtitleDocumentBuilder:
     def build(self, record: SubtitleRecord) -> dict:
         return {
+            "id": make_meilisearch_safe_id(record.subtitle_id),
             "subtitle_id": record.subtitle_id,
             "video_id": record.video_id,
             "start_time_sec": record.start_time_sec,

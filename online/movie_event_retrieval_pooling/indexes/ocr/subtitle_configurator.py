@@ -8,7 +8,7 @@ class SubtitleIndexConfigurator:
         self.client = client
 
     def configure(self, index_uid: str) -> None:
-        self.client.create_index(index_uid=index_uid, primary_key="subtitle_id")
+        self.client.create_index(index_uid=index_uid, primary_key="id")
         task = self.client.update_settings(
             index_uid=index_uid,
             settings={
@@ -22,6 +22,7 @@ class SubtitleIndexConfigurator:
                 "searchableAttributes": ["text"],
                 "filterableAttributes": ["video_id"],
                 "displayedAttributes": [
+                    "id",
                     "subtitle_id",
                     "video_id",
                     "start_time_sec",
