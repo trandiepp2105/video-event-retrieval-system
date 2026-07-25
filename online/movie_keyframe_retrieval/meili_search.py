@@ -96,7 +96,11 @@ class MeiliSearchService:
             task_uid = task_info.get("taskUid") or task_info.get("uid")
         if task_uid is None:
             return
-        self.client.wait_for_task(task_uid)
+        self.client.wait_for_task(
+            task_uid,
+            timeout_in_ms=600000,
+            interval_in_ms=1000,
+        )
 
     def create_indices(self) -> None:
         self._create_index(
@@ -140,65 +144,99 @@ class MeiliSearchService:
         self,
         index: Any,
         documents: list[dict[str, Any]],
+        *,
+        label: str,
+        batch_index: int,
+        wait_each_batch: bool | None = None,
     ) -> Any:
         if not documents:
             return None
+        effective_wait_each_batch = self.wait_each_batch if wait_each_batch is None else bool(wait_each_batch)
+        print(f"[{label}] Upload batch {batch_index} | docs={len(documents)}")
         task = index.add_documents(documents)
-        if self.wait_each_batch:
+        task_uid = getattr(task, "task_uid", None) or (task.get("taskUid") if isinstance(task, dict) else None)
+        print(f"[{label}] Submitted task_uid={task_uid}")
+        if effective_wait_each_batch:
+            print(f"[{label}] Waiting task_uid={task_uid}")
             self._wait_for_task(task)
+            print(f"[{label}] Done task_uid={task_uid}")
         return task
 
-    def index_ocr_dataset(self, data_path: Path) -> None:
+    def index_ocr_dataset(
+        self,
+        data_path: Path,
+        wait_each_batch: bool | None = None,
+        max_docs_per_batch: int | None = None,
+    ) -> None:
         index = self.client.get_index(self.ocr_index_name)
-        json_files = list(Path(data_path).rglob("*.json"))
+        json_files = sorted(Path(data_path).rglob("*.json"))
         batch = []
+        batch_index = 0
         last_task = None
-        for i, jf in enumerate(tqdm(json_files, desc=self.ocr_index_name)):
+        effective_max_docs_per_batch = self.max_docs_per_batch if max_docs_per_batch is None else int(max_docs_per_batch)
+        effective_wait_each_batch = self.wait_each_batch if wait_each_batch is None else bool(wait_each_batch)
+        label = f"OCR->{self.ocr_index_name}"
+        for jf in tqdm(json_files, desc=label):
             with open(jf, "r", encoding="utf-8") as file:
                 data = json.load(file)
             video_name = jf.stem
             if isinstance(data, dict):
-                for frame_index, text in data.items():
-                    normalized_text = normalize_text(text)
-                    if normalized_text:
-                        batch.append(
-                            {
-                                "id": f"{self.ocr_index_name}_{video_name}_{frame_index}",
-                                "video_name": video_name,
-                                "frame_index": int(frame_index),
-                                "text": normalized_text,
-                            }
-                        )
-                        if len(batch) >= self.max_docs_per_batch:
-                            last_task = self._submit_documents(index, batch)
-                            batch = []
+                iterable = [{"frame_index": frame_index, "text": text} for frame_index, text in data.items()]
             elif isinstance(data, list):
-                for item in data:
-                    text = normalize_text(item.get("text", ""))
-                    frame_index = item.get("frame_id", item.get("frame_index", -1))
-                    if text and frame_index != -1:
-                        batch.append(
-                            {
-                                "id": f"{self.ocr_index_name}_{video_name}_{frame_index}",
-                                "video_name": video_name,
-                                "frame_index": int(frame_index),
-                                "text": text,
-                            }
+                iterable = data
+            else:
+                iterable = []
+            for item in iterable:
+                text = normalize_text(item.get("text", ""))
+                frame_index = item.get("frame_id", item.get("frame_index", -1))
+                if text and frame_index != -1:
+                    batch.append(
+                        {
+                            "id": f"{self.ocr_index_name}_{video_name}_{frame_index}",
+                            "video_name": video_name,
+                            "frame_index": int(frame_index),
+                            "text": text,
+                        }
+                    )
+                    if len(batch) >= effective_max_docs_per_batch:
+                        batch_index += 1
+                        last_task = self._submit_documents(
+                            index,
+                            batch,
+                            label=label,
+                            batch_index=batch_index,
+                            wait_each_batch=effective_wait_each_batch,
                         )
-                        if len(batch) >= self.max_docs_per_batch:
-                            last_task = self._submit_documents(index, batch)
-                            batch = []
+                        batch = []
         if batch:
-            last_task = self._submit_documents(index, batch)
-        if not self.wait_each_batch and last_task is not None:
+            batch_index += 1
+            last_task = self._submit_documents(
+                index,
+                batch,
+                label=label,
+                batch_index=batch_index,
+                wait_each_batch=effective_wait_each_batch,
+            )
+        if not effective_wait_each_batch and last_task is not None:
+            print(f"[{label}] Waiting final task...")
             self._wait_for_task(last_task)
+            print(f"[{label}] Final task done")
 
-    def index_subtitle_dataset(self, data_path: Path) -> None:
+    def index_subtitle_dataset(
+        self,
+        data_path: Path,
+        wait_each_batch: bool | None = None,
+        max_docs_per_batch: int | None = None,
+    ) -> None:
         index = self.client.get_index(self.subtitle_index_name)
-        json_files = list(Path(data_path).rglob("*.json"))
+        json_files = sorted(Path(data_path).rglob("*.json"))
         batch = []
+        batch_index = 0
         last_task = None
-        for i, jf in enumerate(tqdm(json_files, desc=self.subtitle_index_name)):
+        effective_max_docs_per_batch = self.max_docs_per_batch if max_docs_per_batch is None else int(max_docs_per_batch)
+        effective_wait_each_batch = self.wait_each_batch if wait_each_batch is None else bool(wait_each_batch)
+        label = f"Subtitle->{self.subtitle_index_name}"
+        for jf in tqdm(json_files, desc=label):
             with open(jf, "r", encoding="utf-8") as file:
                 subs = json.load(file)
             video_name = jf.stem
@@ -216,13 +254,29 @@ class MeiliSearchService:
                             "text": normalized_text,
                         }
                     )
-                    if len(batch) >= self.max_docs_per_batch:
-                        last_task = self._submit_documents(index, batch)
+                    if len(batch) >= effective_max_docs_per_batch:
+                        batch_index += 1
+                        last_task = self._submit_documents(
+                            index,
+                            batch,
+                            label=label,
+                            batch_index=batch_index,
+                            wait_each_batch=effective_wait_each_batch,
+                        )
                         batch = []
         if batch:
-            last_task = self._submit_documents(index, batch)
-        if not self.wait_each_batch and last_task is not None:
+            batch_index += 1
+            last_task = self._submit_documents(
+                index,
+                batch,
+                label=label,
+                batch_index=batch_index,
+                wait_each_batch=effective_wait_each_batch,
+            )
+        if not effective_wait_each_batch and last_task is not None:
+            print(f"[{label}] Waiting final task...")
             self._wait_for_task(last_task)
+            print(f"[{label}] Final task done")
 
     def search_ocr(self, query: str, size: int = 1000) -> list[dict[str, Any]]:
         return self._search_text_index(query, self.ocr_index_name, size)
