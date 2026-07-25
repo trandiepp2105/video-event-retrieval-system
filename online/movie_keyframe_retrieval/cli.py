@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .builders import VisualIndexBuilder
 from .encoders import OpenClipTextEncoder
 from .io_utils import load_json, save_json
 from .meili_search import MeiliSearchService
@@ -212,11 +211,21 @@ def main() -> None:
     if args.command == "build-visual-index":
         input_dirs = [Path(item) for item in args.keyframe_embedding_dir]
         index_names = _resolve_visual_names(args)
+        faiss_configs = []
         for input_dir, index_name in zip(input_dirs, index_names):
-            index = VisualIndexBuilder(input_dir, index_name=index_name).build()
             save_dir = args.output_dir / f"{index_name}_index" if len(input_dirs) > 1 else args.output_dir
-            index.save(save_dir)
-            print(f"Saved visual index '{index_name}' to: {save_dir}")
+            faiss_configs.append(
+                {
+                    "model_name": index_name,
+                    "embedding_path": input_dir,
+                    "output_index_path": save_dir,
+                }
+            )
+        engine = FAISSSearchEngine(faiss_configs)
+        engine.build_all_indexes()
+        engine.save_all_indexes()
+        for index_name, config in zip(index_names, faiss_configs):
+            print(f"Saved visual index '{index_name}' to: {config['output_index_path']}")
         return
 
     if args.command == "build-subtitle-index":
@@ -247,10 +256,19 @@ def main() -> None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         input_dirs = [Path(item) for item in args.keyframe_embedding_dir]
         index_names = _resolve_visual_names(args)
+        faiss_configs = []
         for input_dir, index_name in zip(input_dirs, index_names):
-            visual_index = VisualIndexBuilder(input_dir, index_name=index_name).build()
             save_dir = args.output_dir / f"{index_name}_index" if len(input_dirs) > 1 else args.output_dir / "visual_index"
-            visual_index.save(save_dir)
+            faiss_configs.append(
+                {
+                    "model_name": index_name,
+                    "embedding_path": input_dir,
+                    "output_index_path": save_dir,
+                }
+            )
+        engine = FAISSSearchEngine(faiss_configs)
+        engine.build_all_indexes()
+        engine.save_all_indexes()
         service = MeiliSearchService(
             url=args.meilisearch_url,
             api_key=args.meilisearch_api_key,

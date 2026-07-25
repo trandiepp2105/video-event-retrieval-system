@@ -3,15 +3,19 @@ from __future__ import annotations
 import concurrent.futures
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 
 from .encoders import OpenClipTextEncoder
+from .faiss_index import FaissIndex
+from .io_utils import load_pickle, utc_timestamp
 from .meili_search import MeiliSearchService
+from .metadata import MetadataStore
 from .registry import IndexRegistry
 from .reranker import Reranker
-from .schemas import SearchResult, StageQuery
+from .schemas import FrameRangeMetadata, SearchResult, StageQuery
 
 QUERY_CHANNELS = ["text", "ocr", "subtitle", "image"]
 
@@ -35,21 +39,175 @@ class FAISSSearchEngine:
         list_faiss_configs: list[dict[str, Any]],
         reranker: Optional[Reranker] = None,
     ) -> None:
-        self.configs = {cfg["model_name"]: cfg for cfg in list_faiss_configs}
-        self.indexes = {cfg["model_name"]: cfg["index"] for cfg in list_faiss_configs}
-        self.embedders = {cfg["model_name"]: cfg["embedder"] for cfg in list_faiss_configs}
-        self.index_to_meta = {
-            cfg["model_name"]: [
-                (meta.video_id, int(meta.frame_start))
-                for meta in cfg["index"].metadata_store.get_many(cfg["index"].ids.tolist())
-            ]
-            for cfg in list_faiss_configs
-        }
+        if not isinstance(list_faiss_configs, list) or not list_faiss_configs:
+            raise ValueError("list_faiss_configs phải là list không rỗng.")
+
+        self.configs: dict[str, dict[str, Any]] = {}
+        self.indexes: dict[str, FaissIndex] = {}
+        self.embedders: dict[str, Any] = {}
+        self.index_to_meta: dict[str, list[tuple[str, int]]] = {}
+        self.meta_to_index: dict[str, dict[tuple[str, int], int]] = {}
+        self.total_vectors: dict[str, int] = {}
+        self.embedding_dims: dict[str, int] = {}
+        self.gpu_resources_map: dict[int, Any] = {}
+
+        for cfg in list_faiss_configs:
+            model_name = str(cfg["model_name"])
+            self.configs[model_name] = dict(cfg)
+            embedder = cfg.get("embedder")
+            if embedder is not None:
+                self.embedders[model_name] = embedder
+            existing_index = cfg.get("index")
+            if existing_index is not None:
+                self._register_loaded_index(model_name, existing_index)
+
         self.reranker = reranker if reranker else Reranker()
+
+    def _register_loaded_index(self, model_name: str, index: FaissIndex) -> None:
+        self.indexes[model_name] = index
+        metas = index.metadata_store.get_many(index.ids.tolist())
+        meta_list = [(meta.video_id, int(meta.frame_start)) for meta in metas]
+        self.index_to_meta[model_name] = meta_list
+        self.meta_to_index[model_name] = {meta: row for row, meta in enumerate(meta_list)}
+        self.total_vectors[model_name] = int(index.ids.shape[0])
+        self.embedding_dims[model_name] = int(index.vectors.shape[1]) if index.vectors.ndim == 2 else 0
+
+    def _get_gpu_resource(self, gpu_id: int):
+        if gpu_id not in self.gpu_resources_map:
+            try:
+                import faiss  # type: ignore
+
+                self.gpu_resources_map[gpu_id] = faiss.StandardGpuResources()
+            except Exception:
+                self.gpu_resources_map[gpu_id] = None
+        return self.gpu_resources_map[gpu_id]
+
+    @staticmethod
+    def _iter_embedding_records(embedding_path: Path):
+        if embedding_path.is_file():
+            payload = load_pickle(embedding_path)
+            if isinstance(payload, list):
+                for item in payload:
+                    yield item
+                return
+            if isinstance(payload, dict):
+                yield payload
+                return
+            raise ValueError(f"Embedding file không hợp lệ: {embedding_path}")
+
+        if embedding_path.is_dir():
+            for pkl_path in sorted(embedding_path.glob("*.pkl")):
+                payload = load_pickle(pkl_path)
+                if not isinstance(payload, dict):
+                    raise ValueError(f"Mỗi file pkl phải là dict: {pkl_path}")
+                if "video_name" not in payload:
+                    payload = {**payload, "video_name": pkl_path.stem}
+                yield payload
+            return
+
+        raise FileNotFoundError(f"Không tìm thấy embedding path: {embedding_path}")
+
+    def _build_single_index(self, model_name: str) -> None:
+        if model_name not in self.configs:
+            raise KeyError(f"Không tìm thấy cấu hình cho model '{model_name}'.")
+
+        config = self.configs[model_name]
+        embedding_path_value = config.get("embedding_path")
+        if embedding_path_value is None:
+            raise ValueError(f"Cấu hình của '{model_name}' thiếu embedding_path.")
+        embedding_path = Path(embedding_path_value)
+
+        vectors: list[np.ndarray] = []
+        ids: list[int] = []
+        store = MetadataStore()
+        index_id = 0
+
+        for video_record in self._iter_embedding_records(embedding_path):
+            if not isinstance(video_record, dict):
+                raise ValueError("Mỗi phần tử embedding record phải là dict.")
+
+            video_name = str(video_record.get("video_name", ""))
+            frame_indices = video_record.get("keyframe_frame_indices")
+            embeddings = video_record.get("keyframe_embeddings")
+
+            if not video_name:
+                raise ValueError(f"Thiếu video_name trong embedding record của model '{model_name}'.")
+            if frame_indices is None or embeddings is None:
+                raise ValueError(
+                    f"Thiếu keyframe_frame_indices/keyframe_embeddings trong dữ liệu của model '{model_name}'."
+                )
+
+            embeddings = np.asarray(embeddings, dtype=np.float32)
+            if embeddings.ndim == 1:
+                embeddings = embeddings.reshape(1, -1)
+            if len(frame_indices) != int(embeddings.shape[0]):
+                raise ValueError(
+                    f"Frame/embedding mismatch cho video '{video_name}' của model '{model_name}': "
+                    f"{len(frame_indices)} vs {embeddings.shape[0]}"
+                )
+
+            for row, frame_idx in enumerate(frame_indices):
+                frame_idx = int(frame_idx)
+                vectors.append(np.asarray(embeddings[row], dtype=np.float32).reshape(-1))
+                ids.append(index_id)
+                store.add(
+                    FrameRangeMetadata(
+                        index_id=index_id,
+                        video_id=video_name,
+                        frame_start=frame_idx,
+                        frame_end=frame_idx,
+                        item_id=frame_idx,
+                    )
+                )
+                index_id += 1
+
+        if not vectors:
+            raise ValueError(f"Không tìm thấy embedding nào cho model '{model_name}'.")
+
+        matrix = np.stack(vectors).astype(np.float32)
+        index = FaissIndex.build(
+            vectors=matrix,
+            ids=np.asarray(ids, dtype=np.int64),
+            metadata_store=store,
+            index_name=model_name,
+            config={
+                "index_name": model_name,
+                "metric": "cosine",
+                "index_type": config.get("index_type", "IndexFlatIP"),
+                "normalized": True,
+                "dim": int(matrix.shape[1]),
+                "num_vectors": int(matrix.shape[0]),
+                "input_dir": str(embedding_path),
+                "created_at": utc_timestamp(),
+            },
+        )
+        self._register_loaded_index(model_name, index)
+
+    def build_all_indexes(self) -> None:
+        for model_name in self.configs:
+            if model_name not in self.indexes:
+                self._build_single_index(model_name)
+
+    def save_all_indexes(self) -> None:
+        for model_name, index in self.indexes.items():
+            output_path = self.configs[model_name].get("output_index_path")
+            if not output_path:
+                continue
+            index.save(Path(output_path))
+
+    def load_all_indexes(self) -> None:
+        for model_name, config in self.configs.items():
+            input_index_path = config.get("input_index_path")
+            if not input_index_path:
+                continue
+            loaded_index = FaissIndex.load(Path(input_index_path))
+            self._register_loaded_index(model_name, loaded_index)
 
     def _search_single_model(self, model_name: str, queries: list[str], k: int):
         if model_name not in self.indexes:
             return [[] for _ in queries]
+        if model_name not in self.embedders:
+            raise ValueError(f"Model '{model_name}' chưa có embedder để search.")
         index = self.indexes[model_name]
         embedder = self.embedders[model_name]
         query_array = embedder.encode_batch(queries)
@@ -308,10 +466,19 @@ class SearchEngine:
         stage_query: StageQuery,
         *,
         top_k: int = 100,
+        visual_top_k: Optional[int] = None,
+        subtitle_top_k: Optional[int] = None,
+        ocr_top_k: Optional[int] = None,
         visual_weight: float = 0.45,
         ocr_weight: float = 0.35,
         subtitle_weight: float = 0.20,
     ) -> list[StageCandidate]:
+        internal_k = max(
+            int(top_k),
+            int(visual_top_k) if visual_top_k is not None else int(top_k),
+            int(subtitle_top_k) if subtitle_top_k is not None else int(top_k),
+            int(ocr_top_k) if ocr_top_k is not None else int(top_k),
+        )
         weights = {"text": visual_weight, "ocr": ocr_weight, "subtitle": subtitle_weight, "image": 0.0}
         weights = self._build_stage_weights(
             {"text": stage_query.visual, "ocr": stage_query.ocr, "subtitle": stage_query.subtitle},
@@ -321,12 +488,12 @@ class SearchEngine:
             text_query=stage_query.visual or None,
             ocr_query=stage_query.ocr or None,
             subtitle_query=stage_query.subtitle or None,
-            k=top_k,
+            k=internal_k,
             weights=weights,
         )
         return [
             StageCandidate(video_id=video_id, frame_idx=frame_idx, fused_score=float(score))
-            for (video_id, frame_idx), score in fused
+            for (video_id, frame_idx), score in fused[: int(top_k)]
         ]
 
     def _group_temporal_candidates(self, temporal_candidates, frame_distance: int):
