@@ -75,6 +75,8 @@ class MeiliSearchService:
         ocr_index_name: str,
         subtitle_index_name: str,
         limit_search: int = 500,
+        max_docs_per_batch: int = 10000,
+        wait_each_batch: bool = False,
     ) -> None:
         self.url = str(url)
         self.api_key = str(api_key)
@@ -82,6 +84,8 @@ class MeiliSearchService:
         self.ocr_index_name = str(ocr_index_name)
         self.subtitle_index_name = str(subtitle_index_name)
         self.limit_search = int(limit_search)
+        self.max_docs_per_batch = int(max_docs_per_batch)
+        self.wait_each_batch = bool(wait_each_batch)
         self.scoring = Score2Text()
 
     def _wait_for_task(self, task_info: Any) -> None:
@@ -132,10 +136,23 @@ class MeiliSearchService:
         task = index.update_settings(settings)
         self._wait_for_task(task)
 
+    def _submit_documents(
+        self,
+        index: Any,
+        documents: list[dict[str, Any]],
+    ) -> Any:
+        if not documents:
+            return None
+        task = index.add_documents(documents)
+        if self.wait_each_batch:
+            self._wait_for_task(task)
+        return task
+
     def index_ocr_dataset(self, data_path: Path) -> None:
         index = self.client.get_index(self.ocr_index_name)
         json_files = list(Path(data_path).rglob("*.json"))
         batch = []
+        last_task = None
         for i, jf in enumerate(tqdm(json_files, desc=self.ocr_index_name)):
             with open(jf, "r", encoding="utf-8") as file:
                 data = json.load(file)
@@ -152,6 +169,9 @@ class MeiliSearchService:
                                 "text": normalized_text,
                             }
                         )
+                        if len(batch) >= self.max_docs_per_batch:
+                            last_task = self._submit_documents(index, batch)
+                            batch = []
             elif isinstance(data, list):
                 for item in data:
                     text = normalize_text(item.get("text", ""))
@@ -165,15 +185,19 @@ class MeiliSearchService:
                                 "text": text,
                             }
                         )
-            if (i + 1) % 100 == 0 or (i + 1) == len(json_files):
-                if batch:
-                    index.add_documents(batch)
-                    batch = []
+                        if len(batch) >= self.max_docs_per_batch:
+                            last_task = self._submit_documents(index, batch)
+                            batch = []
+        if batch:
+            last_task = self._submit_documents(index, batch)
+        if not self.wait_each_batch and last_task is not None:
+            self._wait_for_task(last_task)
 
     def index_subtitle_dataset(self, data_path: Path) -> None:
         index = self.client.get_index(self.subtitle_index_name)
         json_files = list(Path(data_path).rglob("*.json"))
         batch = []
+        last_task = None
         for i, jf in enumerate(tqdm(json_files, desc=self.subtitle_index_name)):
             with open(jf, "r", encoding="utf-8") as file:
                 subs = json.load(file)
@@ -192,10 +216,13 @@ class MeiliSearchService:
                             "text": normalized_text,
                         }
                     )
-            if (i + 1) % 100 == 0 or (i + 1) == len(json_files):
-                if batch:
-                    index.add_documents(batch)
-                    batch = []
+                    if len(batch) >= self.max_docs_per_batch:
+                        last_task = self._submit_documents(index, batch)
+                        batch = []
+        if batch:
+            last_task = self._submit_documents(index, batch)
+        if not self.wait_each_batch and last_task is not None:
+            self._wait_for_task(last_task)
 
     def search_ocr(self, query: str, size: int = 1000) -> list[dict[str, Any]]:
         return self._search_text_index(query, self.ocr_index_name, size)
