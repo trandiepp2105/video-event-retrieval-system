@@ -12,6 +12,70 @@ from .schemas import StageQuery
 from .search import FAISSSearchEngine, SearchEngine
 
 
+def _format_timecode_from_frame(frame_idx: int, fps: float = 25.0) -> str:
+    total_seconds = max(float(frame_idx) / float(fps), 0.0)
+    hours = int(total_seconds // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+    seconds = total_seconds % 60.0
+    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+
+
+def _print_keyframe_stage_results(results: list[dict], limit: int = 10) -> None:
+    if not results:
+        print("No results.")
+        return
+    print("Top results")
+    for idx, item in enumerate(results[:limit], start=1):
+        print(
+            f"{idx:>2}. video={item['video_id']} "
+            f"frame={item['frame_idx']} "
+            f"time={_format_timecode_from_frame(int(item['frame_idx']))} "
+            f"score={float(item['fused_score']):.4f} "
+            f"(visual={float(item.get('visual_score', 0.0)):.4f}, "
+            f"subtitle={float(item.get('subtitle_score', 0.0)):.4f}, "
+            f"ocr={float(item.get('ocr_score', 0.0)):.4f})"
+        )
+
+
+def _print_keyframe_temporal_results(results: list, limit: int = 5) -> None:
+    if not results:
+        print("No temporal chains.")
+        return
+    print("Top temporal chains")
+    for chain_idx, chain in enumerate(results[:limit], start=1):
+        total_score = float(chain[0][1][1]) if chain else 0.0
+        print(f"{chain_idx:>2}. total_score={total_score:.4f} | steps={len(chain)}")
+        for step_idx, ((video_id, frame_idx), (_stage_scores, _chain_score, matched_stage_idx)) in enumerate(chain, start=1):
+            print(
+                f"    step={step_idx} stage={matched_stage_idx + 1} "
+                f"video={video_id} frame={frame_idx} time={_format_timecode_from_frame(int(frame_idx))}"
+            )
+
+
+def _print_keyframe_query_payload(payload: dict) -> None:
+    print(f"Mode: {payload.get('mode', '')}")
+    stage_queries = payload.get("stage_queries") or []
+    print(f"Stages: {len(stage_queries)}")
+    for idx, stage in enumerate(stage_queries, start=1):
+        print(f"  Stage {idx}: {stage}")
+    results = payload.get("results") or []
+    if payload.get("mode") == "multi-stage":
+        _print_keyframe_temporal_results(results, limit=5)
+    else:
+        formatted = [
+            {
+                "video_id": video_id,
+                "frame_idx": frame_idx,
+                "fused_score": score,
+                "visual_score": score,
+                "subtitle_score": 0.0,
+                "ocr_score": 0.0,
+            }
+            for (video_id, frame_idx), score in results[:10]
+        ]
+        _print_keyframe_stage_results(formatted, limit=10)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Movie event retrieval system CLI (current mode: keyframe retrieval)"
@@ -66,7 +130,6 @@ def build_parser() -> argparse.ArgumentParser:
     search_stage.add_argument("--meilisearch_api_key", type=str, required=True)
     search_stage.add_argument("--ocr_index_name", type=str, required=True)
     search_stage.add_argument("--subtitle_index_name", type=str, required=True)
-    search_stage.add_argument("--debug", action="store_true")
     search_stage.add_argument("--output_json", type=Path, default=None)
 
     search_temporal = subparsers.add_parser("search-temporal")
@@ -225,8 +288,7 @@ def main() -> None:
         engine = FAISSSearchEngine(faiss_configs)
         engine.build_all_indexes()
         engine.save_all_indexes()
-        for index_name, config in zip(index_names, faiss_configs):
-            print(f"Saved visual index '{index_name}' to: {config['output_index_path']}")
+        print(f"Saved {len(index_names)} visual index(es) to: {args.output_dir}")
         return
 
     if args.command == "build-subtitle-index":
@@ -238,7 +300,7 @@ def main() -> None:
         )
         service.create_indices()
         service.index_subtitle_dataset(args.subtitle_dir)
-        print(f"Indexed subtitle documents to Meilisearch index: {args.subtitle_index_name}")
+        print(f"Subtitle index ready: {args.subtitle_index_name}")
         return
 
     if args.command == "build-ocr-index":
@@ -250,7 +312,7 @@ def main() -> None:
         )
         service.create_indices()
         service.index_ocr_dataset(args.ocr_dir)
-        print(f"Indexed OCR documents to Meilisearch index: {args.ocr_index_name}")
+        print(f"OCR index ready: {args.ocr_index_name}")
         return
 
     if args.command == "build-all":
@@ -279,7 +341,7 @@ def main() -> None:
         service.create_indices()
         service.index_ocr_dataset(args.ocr_dir)
         service.index_subtitle_dataset(args.subtitle_dir)
-        print(f"Saved all indices to: {args.output_dir}")
+        print(f"All indices ready at: {args.output_dir}")
         return
 
     if args.command == "search-stage":
@@ -298,11 +360,10 @@ def main() -> None:
             visual_weight=args.visual_weight,
             ocr_weight=args.ocr_weight,
             subtitle_weight=args.subtitle_weight,
-            debug=args.debug,
         )
         payload = [item.to_dict() for item in results]
         _save_result_if_needed(payload, args.output_json)
-        print(payload[:10])
+        _print_keyframe_stage_results(payload, limit=10)
         return
 
     if args.command == "search-temporal":
@@ -322,7 +383,7 @@ def main() -> None:
             min_stage_gap=args.min_stage_gap,
         )
         _save_result_if_needed(results, args.output_json)
-        print(results[:5])
+        _print_keyframe_temporal_results(results, limit=5)
         return
 
     if args.command == "search-query":
@@ -377,5 +438,5 @@ def main() -> None:
                 "results": results,
             }
         _save_result_if_needed(payload, args.output_json)
-        print(payload)
+        _print_keyframe_query_payload(payload)
         return

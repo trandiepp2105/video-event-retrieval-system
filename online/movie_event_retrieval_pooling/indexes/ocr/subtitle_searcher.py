@@ -84,28 +84,9 @@ class SubtitleSearcher:
     def search(self, query: str, top_k: int) -> list[SearchHit]:
         query_norm = normalize_text(query)
         if not query_norm:
-            print("[Subtitle] Empty normalized query, skip subtitle search")
             return []
 
         retrieve_k = max(int(top_k), min(int(top_k) * self.candidate_multiplier, 1000))
-        print(f"[Subtitle] Search start | index={self.index_uid} | top_k={top_k} | retrieve_k={retrieve_k}")
-        print(f"[Subtitle] Raw query: {query}")
-        print(f"[Subtitle] Normalized query: {query_norm}")
-        try:
-            index_info = self.client.get_index(self.index_uid)
-            index_stats = self.client.get_index_stats(self.index_uid)
-            print(
-                "[Subtitle] Index info: "
-                f"uid={index_info.get('uid')} "
-                f"primaryKey={index_info.get('primaryKey')}"
-            )
-            print(
-                "[Subtitle] Index stats: "
-                f"documents={index_stats.get('numberOfDocuments')} "
-                f"isIndexing={index_stats.get('isIndexing')}"
-            )
-        except Exception as exc:
-            print(f"[Subtitle] Failed to inspect index '{self.index_uid}': {exc!r}")
         payload = self.client.search(
             index_uid=self.index_uid,
             query=query_norm,
@@ -115,15 +96,6 @@ class SubtitleSearcher:
             show_ranking_score=False,
         )
         raw_hits = payload.get("hits", [])
-        print(f"[Subtitle] Raw Meilisearch hits: {len(raw_hits)}")
-        for idx, item in enumerate(raw_hits[:5], start=1):
-            print(
-                "[Subtitle] Raw hit "
-                f"{idx}: subtitle_id={item.get('subtitle_id')} "
-                f"video_id={item.get('video_id')} "
-                f"frame=({item.get('frame_start')},{item.get('frame_end')}) "
-                f"text={_preview_text(item.get('text', ''))}"
-            )
 
         rescored: list[tuple[float, str, str]] = []
         for item in raw_hits:
@@ -134,13 +106,6 @@ class SubtitleSearcher:
                 rescored.append((score, subtitle_id, text))
 
         rescored.sort(key=lambda value: value[0], reverse=True)
-        print(f"[Subtitle] Rescored hits > 0: {len(rescored)}")
-        for idx, (score, subtitle_id, text) in enumerate(rescored[:5], start=1):
-            print(
-                "[Subtitle] Rescored hit "
-                f"{idx}: subtitle_id={subtitle_id} score={score:.6f} "
-                f"text={_preview_text(text)}"
-            )
 
         hits: list[SearchHit] = []
         for rank, (score, subtitle_id, text) in enumerate(rescored[: int(top_k)], start=1):
@@ -153,5 +118,4 @@ class SubtitleSearcher:
                     text=text,
                 )
             )
-        print(f"[Subtitle] Final subtitle hits returned: {len(hits)}")
         return hits

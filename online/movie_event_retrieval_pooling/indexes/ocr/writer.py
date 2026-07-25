@@ -22,9 +22,8 @@ class OCRIndexWriter:
     def add_documents(self, index_uid: str, documents: Sequence[dict]) -> None:
         total_batches = (len(documents) + self.batch_size - 1) // self.batch_size
         print(
-            f"[OCR] Start pushing {len(documents)} OCR documents to Meilisearch "
-            f"(index={index_uid}, batch_size={self.batch_size}, total_batches={total_batches}, "
-            f"wait_each_batch={self.wait_each_batch})"
+            f"[OCR] Indexing {len(documents)} documents "
+            f"(index={index_uid}, batch_size={self.batch_size}, batches={total_batches})"
         )
         batch: list[dict] = []
         batch_index = 0
@@ -40,7 +39,6 @@ class OCRIndexWriter:
             last_task_uid = self._flush(index_uid, batch, batch_index=batch_index, total_batches=total_batches)
         print(f"[OCR] All batches submitted to Meilisearch for index={index_uid}")
         if not self.wait_each_batch and last_task_uid is not None:
-            print(f"[OCR] Waiting final task only: taskUid={last_task_uid}")
             result = self.client.wait_for_task(int(last_task_uid))
             status = result.get("status")
             if status != "succeeded":
@@ -48,19 +46,12 @@ class OCRIndexWriter:
                     f"Meilisearch final task failed for index={index_uid}, "
                     f"taskUid={last_task_uid}, status={status}, payload={result}"
                 )
-            print(f"[OCR] Final task done: taskUid={last_task_uid}")
-        print("[OCR] Finished pushing OCR documents to Meilisearch")
+        print(f"[OCR] Index ready: {index_uid}")
 
     def _flush(self, index_uid: str, batch: list[dict], *, batch_index: int, total_batches: int) -> int:
-        print(
-            f"[OCR] Upload batch {batch_index}/{total_batches} "
-            f"with {len(batch)} documents to index={index_uid}"
-        )
         task = self.client.add_documents(index_uid=index_uid, documents=batch)
         task_uid = int(task["taskUid"])
-        print(f"[OCR] Batch {batch_index}/{total_batches} submitted with taskUid={task_uid}")
         if self.wait_each_batch:
-            print(f"[OCR] Waiting batch {batch_index}/{total_batches} taskUid={task_uid}")
             result = self.client.wait_for_task(task_uid)
             status = result.get("status")
             if status != "succeeded":
@@ -68,5 +59,4 @@ class OCRIndexWriter:
                     f"Meilisearch task failed for index={index_uid}, "
                     f"batch={batch_index}/{total_batches}, taskUid={task_uid}, status={status}, payload={result}"
                 )
-            print(f"[OCR] Done batch {batch_index}/{total_batches} taskUid={task_uid}")
         return task_uid

@@ -152,14 +152,9 @@ class MeiliSearchService:
         if not documents:
             return None
         effective_wait_each_batch = self.wait_each_batch if wait_each_batch is None else bool(wait_each_batch)
-        print(f"[{label}] Upload batch {batch_index} | docs={len(documents)}")
         task = index.add_documents(documents)
-        task_uid = getattr(task, "task_uid", None) or (task.get("taskUid") if isinstance(task, dict) else None)
-        print(f"[{label}] Submitted task_uid={task_uid}")
         if effective_wait_each_batch:
-            print(f"[{label}] Waiting task_uid={task_uid}")
             self._wait_for_task(task)
-            print(f"[{label}] Done task_uid={task_uid}")
         return task
 
     def index_ocr_dataset(
@@ -176,6 +171,10 @@ class MeiliSearchService:
         effective_max_docs_per_batch = self.max_docs_per_batch if max_docs_per_batch is None else int(max_docs_per_batch)
         effective_wait_each_batch = self.wait_each_batch if wait_each_batch is None else bool(wait_each_batch)
         label = f"OCR->{self.ocr_index_name}"
+        print(
+            f"[{label}] Indexing {len(json_files)} files "
+            f"(batch_size={effective_max_docs_per_batch}, wait_each_batch={effective_wait_each_batch})"
+        )
         for jf in tqdm(json_files, desc=label):
             with open(jf, "r", encoding="utf-8") as file:
                 data = json.load(file)
@@ -218,9 +217,8 @@ class MeiliSearchService:
                 wait_each_batch=effective_wait_each_batch,
             )
         if not effective_wait_each_batch and last_task is not None:
-            print(f"[{label}] Waiting final task...")
             self._wait_for_task(last_task)
-            print(f"[{label}] Final task done")
+        print(f"[{label}] Indexed successfully")
 
     def index_subtitle_dataset(
         self,
@@ -236,6 +234,10 @@ class MeiliSearchService:
         effective_max_docs_per_batch = self.max_docs_per_batch if max_docs_per_batch is None else int(max_docs_per_batch)
         effective_wait_each_batch = self.wait_each_batch if wait_each_batch is None else bool(wait_each_batch)
         label = f"Subtitle->{self.subtitle_index_name}"
+        print(
+            f"[{label}] Indexing {len(json_files)} files "
+            f"(batch_size={effective_max_docs_per_batch}, wait_each_batch={effective_wait_each_batch})"
+        )
         for jf in tqdm(json_files, desc=label):
             with open(jf, "r", encoding="utf-8") as file:
                 subs = json.load(file)
@@ -274,9 +276,8 @@ class MeiliSearchService:
                 wait_each_batch=effective_wait_each_batch,
             )
         if not effective_wait_each_batch and last_task is not None:
-            print(f"[{label}] Waiting final task...")
             self._wait_for_task(last_task)
-            print(f"[{label}] Final task done")
+        print(f"[{label}] Indexed successfully")
 
     def search_ocr(self, query: str, size: int = 1000) -> list[dict[str, Any]]:
         return self._search_text_index(query, self.ocr_index_name, size)

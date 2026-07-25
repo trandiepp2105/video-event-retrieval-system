@@ -6,6 +6,44 @@ from pathlib import Path
 from .config import BuildConfig, SearchConfig
 
 
+def _format_timecode(seconds: float) -> str:
+    total_seconds = max(float(seconds), 0.0)
+    hours = int(total_seconds // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+    secs = total_seconds % 60.0
+    return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
+
+
+def _print_pooling_summary(result: dict) -> None:
+    query = result.get("query", {})
+    print("Query")
+    print(f"  raw_query: {query.get('raw_query', '')}")
+    if query.get("translated_query"):
+        print(f"  translated_query: {query.get('translated_query', '')}")
+    if query.get("subtitle_query"):
+        print(f"  subtitle_query: {query.get('subtitle_query', '')}")
+    if query.get("ocr_query"):
+        print(f"  ocr_query: {query.get('ocr_query', '')}")
+
+    final_events = result.get("final_events", [])
+    print(f"\nFinal events: {len(final_events)}")
+    for idx, item in enumerate(final_events[:10], start=1):
+        print(
+            f"{idx:>2}. video={item['video_id']} event={item['event_id']} "
+            f"time={_format_timecode(item['start_time_sec'])}-{_format_timecode(item['end_time_sec'])} "
+            f"score={float(item['score']):.4f} shots={len(item.get('shot_ids', []))}"
+        )
+
+    top_shots = result.get('shot_level', {}).get('top_shots', [])
+    print(f"\nTop shots: {len(top_shots)}")
+    for idx, item in enumerate(top_shots[:10], start=1):
+        print(
+            f"{idx:>2}. video={item['video_id']} shot={item['shot_id']} event={item['event_id']} "
+            f"time={_format_timecode(item['start_time_sec'])}-{_format_timecode(item['end_time_sec'])} "
+            f"score={float(item['score']):.4f}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pooling movie event retrieval CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -118,7 +156,15 @@ def main() -> None:
                 overwrite=args.overwrite,
             )
         )
-        print(manifest)
+        print(
+            "Build complete\n"
+            f"  output_dir: {args.output_dir}\n"
+            f"  videos: {manifest.get('num_videos', 0)}\n"
+            f"  events: {manifest.get('num_events', 0)}\n"
+            f"  shots: {manifest.get('num_shots', 0)}\n"
+            f"  subtitles: {manifest.get('num_subtitles', 0)}\n"
+            f"  ocr_items: {manifest.get('num_ocr_items', 0)}"
+        )
         return
 
     if args.command == "search":
@@ -163,4 +209,4 @@ def main() -> None:
                 output_json=args.output_json,
             )
         )
-        print(result)
+        _print_pooling_summary(result)
