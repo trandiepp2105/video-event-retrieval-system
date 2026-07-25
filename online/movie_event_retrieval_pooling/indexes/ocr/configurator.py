@@ -12,6 +12,13 @@ class OCRIndexConfigurator:
         task = self.client.update_settings(
             index_uid=index_uid,
             settings={
+                "rankingRules": ["typo", "proximity", "words", "exactness", "attribute", "sort"],
+                "pagination": {"maxTotalHits": 5000},
+                "distinctAttribute": None,
+                "typoTolerance": {
+                    "enabled": True,
+                    "minWordSizeForTypos": {"oneTypo": 2, "twoTypos": 3},
+                },
                 "searchableAttributes": ["text_clean", "text_raw"],
                 "filterableAttributes": ["video_id", "event_id", "shot_id"],
                 "displayedAttributes": [

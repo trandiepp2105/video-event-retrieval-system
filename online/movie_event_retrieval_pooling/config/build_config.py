@@ -17,5 +17,5 @@ class BuildConfig:
     meilisearch_index_name: str
     subtitle_meilisearch_index_name: str | None = None
     meilisearch_api_key: str | None = None
-    meilisearch_batch_size: int = 250
+    meilisearch_batch_size: int = 10000
     overwrite: bool = False
