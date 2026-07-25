@@ -347,6 +347,23 @@ class SearchEngine:
         raw_subtitle_results: list[dict[str, Any]],
         weights: dict[str, float],
     ) -> list[tuple[tuple[str, int], float]]:
+        detailed_results = self._fuse_and_rerank_candidates_detailed(
+            raw_text_results=raw_text_results,
+            raw_image_results=raw_image_results,
+            raw_ocr_results=raw_ocr_results,
+            raw_subtitle_results=raw_subtitle_results,
+            weights=weights,
+        )
+        return [(item["key"], float(item["fused_score"])) for item in detailed_results]
+
+    def _fuse_and_rerank_candidates_detailed(
+        self,
+        raw_text_results: list[tuple[tuple[str, int], float]],
+        raw_image_results: list[tuple[tuple[str, int], float]],
+        raw_ocr_results: list[dict[str, Any]],
+        raw_subtitle_results: list[dict[str, Any]],
+        weights: dict[str, float],
+    ) -> list[dict[str, Any]]:
         all_scores = defaultdict(lambda: {channel: 0.0 for channel in QUERY_CHANNELS})
         for key, score in raw_text_results:
             all_scores[key]["text"] = score
@@ -383,15 +400,28 @@ class SearchEngine:
                     normalized_scores[channel] = 1.0
             fusion_score = sum(weights.get(channel, 0.0) * normalized_scores[channel] for channel in QUERY_CHANNELS)
             if fusion_score > 0:
-                temp_combined_results.append((key, fusion_score))
+                temp_combined_results.append(
+                    {
+                        "key": key,
+                        "fused_score": float(fusion_score),
+                        "raw_scores": dict(scores),
+                        "normalized_scores": dict(normalized_scores),
+                    }
+                )
         if not temp_combined_results:
             return []
-        max_fusion_score = max(score for _, score in temp_combined_results)
+        max_fusion_score = max(item["fused_score"] for item in temp_combined_results)
         final_results = []
-        for key, score in temp_combined_results:
+        for item in temp_combined_results:
+            score = float(item["fused_score"])
             normalized_fusion_score = score / max_fusion_score if max_fusion_score > 0 else (1.0 if score > 0 else 0.0)
-            final_results.append((key, normalized_fusion_score))
-        final_results.sort(key=lambda item: item[1], reverse=True)
+            final_results.append(
+                {
+                    **item,
+                    "fused_score": float(normalized_fusion_score),
+                }
+            )
+        final_results.sort(key=lambda item: item["fused_score"], reverse=True)
         return final_results
 
     def _resolve_vector_models_config(self, vector_models_config):
@@ -484,16 +514,56 @@ class SearchEngine:
             {"text": stage_query.visual, "ocr": stage_query.ocr, "subtitle": stage_query.subtitle},
             weights,
         )
-        fused = self.hybrid_search(
+        raw_results = {channel: [] for channel in QUERY_CHANNELS}
+        vector_models_config = self._resolve_vector_models_config(None)
+        vector_queries, vector_types = self._prepare_hybrid_vector_queries(
             text_query=stage_query.visual or None,
-            ocr_query=stage_query.ocr or None,
-            subtitle_query=stage_query.subtitle or None,
-            k=internal_k,
+            image_query=None,
+        )
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_vector = executor.submit(
+                self.vector_engine.search,
+                vector_queries,
+                vector_models_config,
+                internal_k,
+            ) if vector_queries else None
+            future_subtitle = executor.submit(
+                self.ocr_engine.search_subtitle,
+                stage_query.subtitle,
+                internal_k,
+            ) if stage_query.subtitle else None
+            future_ocr = executor.submit(
+                self.ocr_engine.search_ocr,
+                stage_query.ocr,
+                internal_k,
+            ) if stage_query.ocr else None
+
+            if future_vector is not None:
+                batch_vector_results = future_vector.result()
+                for channel, results in zip(vector_types, batch_vector_results):
+                    raw_results[channel] = results
+            if future_ocr is not None:
+                raw_results["ocr"] = future_ocr.result()
+            if future_subtitle is not None:
+                raw_results["subtitle"] = future_subtitle.result()
+
+        fused = self._fuse_and_rerank_candidates_detailed(
+            raw_text_results=raw_results["text"],
+            raw_image_results=raw_results["image"],
+            raw_ocr_results=raw_results["ocr"],
+            raw_subtitle_results=raw_results["subtitle"],
             weights=weights,
         )
         return [
-            StageCandidate(video_id=video_id, frame_idx=frame_idx, fused_score=float(score))
-            for (video_id, frame_idx), score in fused[: int(top_k)]
+            StageCandidate(
+                video_id=item["key"][0],
+                frame_idx=item["key"][1],
+                fused_score=float(item["fused_score"]),
+                visual_score=float(item["normalized_scores"].get("text", 0.0)),
+                ocr_score=float(item["normalized_scores"].get("ocr", 0.0)),
+                subtitle_score=float(item["normalized_scores"].get("subtitle", 0.0)),
+            )
+            for item in fused[: int(top_k)]
         ]
 
     def _group_temporal_candidates(self, temporal_candidates, frame_distance: int):
