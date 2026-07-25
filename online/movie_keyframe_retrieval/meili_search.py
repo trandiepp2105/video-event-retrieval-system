@@ -84,6 +84,16 @@ class MeiliSearchService:
         self.limit_search = int(limit_search)
         self.scoring = Score2Text()
 
+    def _wait_for_task(self, task_info: Any) -> None:
+        task_uid = None
+        if hasattr(task_info, "task_uid"):
+            task_uid = task_info.task_uid
+        elif isinstance(task_info, dict):
+            task_uid = task_info.get("taskUid") or task_info.get("uid")
+        if task_uid is None:
+            return
+        self.client.wait_for_task(task_uid)
+
     def create_indices(self) -> None:
         self._create_index(
             self.ocr_index_name,
@@ -106,7 +116,8 @@ class MeiliSearchService:
         try:
             index = self.client.get_index(index_name)
         except Exception:
-            self.client.create_index(index_name, {"primaryKey": "id"})
+            task = self.client.create_index(index_name, {"primaryKey": "id"})
+            self._wait_for_task(task)
             index = self.client.get_index(index_name)
         settings = {
             "rankingRules": ["typo", "proximity", "words", "exactness", "attribute", "sort"],
@@ -118,7 +129,8 @@ class MeiliSearchService:
             },
             **extra_settings,
         }
-        index.update_settings(settings)
+        task = index.update_settings(settings)
+        self._wait_for_task(task)
 
     def index_ocr_dataset(self, data_path: Path) -> None:
         index = self.client.get_index(self.ocr_index_name)

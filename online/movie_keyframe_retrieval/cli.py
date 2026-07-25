@@ -102,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
     search_query.add_argument("--raw_query", type=str, required=True)
     search_query.add_argument("--llm_model_path", type=str, required=True)
     search_query.add_argument("--llm_system_prompt", type=str, default=DEFAULT_SYSTEM_PROMPT)
+    search_query.add_argument("--llm_device_map", type=str, default="auto")
+    search_query.add_argument("--llm_torch_dtype", type=str, default="auto")
+    search_query.add_argument("--llm_max_new_tokens", type=int, default=768)
+    search_query.add_argument("--llm_load_in_4bit", action="store_true")
+    search_query.add_argument("--llm_load_in_8bit", action="store_true")
+    search_query.add_argument("--llm_bnb_8bit_cpu_offload", action="store_true")
     search_query.add_argument("--visual_device", type=str, nargs="*", default=None)
     search_query.add_argument("--meilisearch_url", type=str, required=True)
     search_query.add_argument("--meilisearch_api_key", type=str, required=True)
@@ -304,6 +310,12 @@ def main() -> None:
         analyzer = MovieQueryAnalyzer(
             model_id=args.llm_model_path,
             system_prompt=args.llm_system_prompt,
+            device_map=args.llm_device_map,
+            torch_dtype=args.llm_torch_dtype,
+            max_new_tokens=args.llm_max_new_tokens,
+            load_in_4bit=args.llm_load_in_4bit,
+            load_in_8bit=args.llm_load_in_8bit,
+            bnb_8bit_cpu_offload=args.llm_bnb_8bit_cpu_offload,
         )
         analyzed = analyzer.analyze(args.raw_query, return_raw=False)
         if analyzed:
