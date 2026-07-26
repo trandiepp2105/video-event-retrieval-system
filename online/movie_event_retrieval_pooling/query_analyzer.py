@@ -5,20 +5,31 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_SYSTEM_PROMPT = r"""
-You are an AI assistant for Vietnamese movie retrieval query analysis.
+TRANSLATION_SYSTEM_PROMPT = r"""
+You are an expert Vietnamese-to-English translator for movie retrieval queries.
 
-Your task:
-1. Translate the full Vietnamese query into English as `en_query`.
-2. Decompose the query into chronological retrieval stages.
-3. Each stage must contain only these fields:
-   - visual: English visual description
-   - ocr: original visible written text if explicitly provided, otherwise ""
-   - subtitle: original spoken/subtitle text if explicitly provided or strongly implied, otherwise ""
+Your job is to translate the full Vietnamese user query into natural English while preserving retrieval-critical meaning.
 
-Return exactly one valid JSON object:
+Rules:
+1. Output JSON only.
+2. Return exactly one object with one field: {"en_query": "..."}.
+3. Translate the full query to English.
+4. Keep quoted dialogue, OCR text, names, titles, and proper nouns unchanged when appropriate.
+5. Do not explain anything.
+6. Do not add information not present in the query.
+7. If the query contains multiple actions in sequence, keep that sequence in the English translation.
+"""
+
+
+STAGE_SYSTEM_PROMPT = r"""
+You are an AI assistant for multilingual video retrieval query analysis.
+
+Convert one Vietnamese movie/video search query into chronological retrieval stages for shot-level soft temporal retrieval.
+
+Each stage must represent one single action, one single event, or one single visual moment that can be independently searched.
+
+Return exactly one valid JSON object with this schema:
 {
-  "en_query": "",
   "stages": [
     {
       "visual": "",
@@ -28,30 +39,76 @@ Return exactly one valid JSON object:
   ]
 }
 
+Field meaning:
+- visual: only visible content, written in English. This is for visual retrieval.
+- ocr: exact visible written text only, keep original language, do not translate.
+- subtitle: exact spoken words, subtitle text, or dialogue only, keep original language, do not translate.
+
 Rules:
-- Output JSON only.
-- `en_query` must be a faithful English translation of the whole query.
-- `visual` must be in English.
-- `ocr` and `subtitle` must keep the original language from the user query.
-- A stage is one temporal action or one independently retrievable visual moment.
-- Split stages chronologically when the query contains temporal progression like "rồi", "sau đó", "tiếp theo", "then", "after that".
-- If later stages happen in the same place/scene, repeat the shared scene context in the later stage visual description.
-- If someone says/tells/asks/shouts/repeats some words, those words should usually go into `subtitle`.
-- If exact visible written text appears, put it in `ocr`.
-- Do not put spoken words into `visual`.
-- Do not invent missing OCR/subtitle text.
-- If repeated spoken text appears like "lag rồi, lag rồi", keep it in a single stage subtitle field, do not create duplicated stages just because of repetition.
+1. Output JSON only.
+2. Do not use markdown.
+3. Do not invent details.
+4. Split temporal sequences into multiple stages in chronological order.
+5. Temporal connectors such as "sau đó", "rồi", "tiếp theo", "before", "after", "then" usually imply a stage boundary.
+6. A stage must be self-contained and concrete.
+7. visual must never contain spoken words or OCR text verbatim.
+8. subtitle must contain only dialogue/subtitle cues.
+9. If the query says that a person says, tells, asks, shouts, whispers, reads aloud, or repeats some words, then those spoken words must be put into subtitle, even if they are not surrounded by quotation marks.
+10. If the query explicitly gives the spoken content, preserve it in subtitle in the original language.
+11. Do not split one single visual situation into multiple stages only because the same person repeats the same or similar dialogue.
+12. Repeated speech such as "lag rồi, lag rồi" should remain inside one stage as one subtitle string, not be split into multiple duplicate stages.
+13. ocr must contain only exact visible written text. If not explicitly given, leave it empty.
+14. Use simple natural English in visual.
+15. If the query describes one single ongoing moment, return one stage only.
+16. If multiple consecutive stages happen in the same location, setting, room, vehicle, or scene context, later stages must inherit and restate that shared spatial context in visual.
+17. If there is no explicit change of place or scene, assume the later action still happens in the same space as the previous stage.
+18. A later stage must not drop important active scene context such as cafe, bus, classroom, office, bedroom, hospital room, art studio, restaurant, or street if that context still applies.
+19. When a person performs a new action inside the same scene, write the action together with the inherited context, for example: "a girl in an art studio opening her phone to read a message" instead of only "a girl opening her phone".
+20. If a later stage refers to an object or person from an earlier stage, rewrite that context concretely instead of using vague references.
 
 Example:
-Input:
-Một cô gái gọi điện video với bố khi đang ở trên một chuyến xe bus đông đúc, trong điện thoại người bố liên tục nói với con gái rằng lag rồi, lag rồi.
-
+Input: Người đàn ông nhìn vào điện thoại có dòng chữ "I miss you", rồi bật khóc.
 Output:
 {
-  "en_query": "A girl is on a crowded bus making a video call with her father, and on the phone her father repeatedly tells her that it is lagging.",
   "stages": [
     {
-      "visual": "a girl on a crowded bus making a video call on her phone",
+      "visual": "a man looking at a phone screen",
+      "ocr": "I miss you",
+      "subtitle": ""
+    },
+    {
+      "visual": "a man crying while looking at a phone screen",
+      "ocr": "I miss you",
+      "subtitle": ""
+    }
+  ]
+}
+
+Example:
+Input: Một cặp nam nữ ngồi đối diện nhau trong phòng vẽ, rồi cô gái nhận được tin nhắn và mở điện thoại ra xem.
+Output:
+{
+  "stages": [
+    {
+      "visual": "a couple sitting facing each other in an art studio",
+      "ocr": "",
+      "subtitle": ""
+    },
+    {
+      "visual": "a girl in an art studio opening her phone to read a message",
+      "ocr": "",
+      "subtitle": ""
+    }
+  ]
+}
+
+Example:
+Input: Một cô gái gọi điện video với bố khi đang ở trên một chuyến xe bus đông đúc, trong điện thoại người bố liên tục nói với con gái rằng lag rồi, lag rồi.
+Output:
+{
+  "stages": [
+    {
+      "visual": "a girl on a crowded bus having a video call with her father on a phone",
       "ocr": "",
       "subtitle": "lag rồi, lag rồi"
     }
@@ -83,7 +140,6 @@ class SoftTemporalShotQueryAnalyzer:
         self,
         model_id: str,
         *,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         torch_dtype: str = "auto",
         device_map: str = "auto",
         max_new_tokens: int = 768,
@@ -96,11 +152,11 @@ class SoftTemporalShotQueryAnalyzer:
 
         self.torch = torch
         self.model_id = model_id
-        self.system_prompt = system_prompt
+        self.torch_dtype = torch_dtype
+        self.device_map = device_map
         self.max_new_tokens = int(max_new_tokens)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
-        if getattr(self.tokenizer, "padding_side", None) != "left":
-            self.tokenizer.padding_side = "left"
+        self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
@@ -113,25 +169,31 @@ class SoftTemporalShotQueryAnalyzer:
                 llm_int8_enable_fp32_cpu_offload=bnb_8bit_cpu_offload,
             )
 
-        model_kwargs: dict[str, Any] = {
-            "device_map": device_map,
-            "trust_remote_code": True,
-        }
+        model_kwargs: dict[str, Any] = {"device_map": self.device_map, "trust_remote_code": True}
         if quantization_config is not None:
             model_kwargs["quantization_config"] = quantization_config
         else:
-            model_kwargs["torch_dtype"] = torch_dtype
+            model_kwargs["torch_dtype"] = self.torch_dtype
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model_id, **model_kwargs)
         self.model.eval()
 
-    def build_prompt(self, query: str) -> str:
+    def _input_device(self):
+        if hasattr(self.model, "hf_device_map"):
+            for device in self.model.hf_device_map.values():
+                if isinstance(device, int):
+                    return self.torch.device(f"cuda:{device}")
+                if isinstance(device, str) and device not in {"cpu", "disk"}:
+                    return self.torch.device(device)
+        return self.model.device
+
+    def _build_prompt(self, system_prompt: str, user_text: str) -> str:
         messages = [
             {
                 "role": "system",
-                "content": self.system_prompt + "\n\nOutput the final JSON object only. Do not output analysis or markdown.",
+                "content": system_prompt + "\n\nDo not think step by step. Do not output <think>. Output the final JSON object only.",
             },
-            {"role": "user", "content": query.strip() + "\n\n/no_think"},
+            {"role": "user", "content": user_text.strip() + "\n\n/no_think"},
         ]
         if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template is not None:
             try:
@@ -153,16 +215,7 @@ class SoftTemporalShotQueryAnalyzer:
         text += "ASSISTANT:\n"
         return text
 
-    def _input_device(self):
-        if hasattr(self.model, "hf_device_map"):
-            for device in self.model.hf_device_map.values():
-                if isinstance(device, int):
-                    return self.torch.device(f"cuda:{device}")
-                if isinstance(device, str) and device not in {"cpu", "disk"}:
-                    return self.torch.device(device)
-        return self.model.device
-
-    def generate_text(self, prompt_text: str) -> str:
+    def _generate(self, prompt_text: str) -> str:
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
         device = self._input_device()
         inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -185,7 +238,7 @@ class SoftTemporalShotQueryAnalyzer:
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
     @staticmethod
-    def extract_json_payload(text: str) -> str:
+    def _extract_json_payload(text: str) -> str:
         cleaned = str(text).strip().replace("```json", "").replace("```", "").strip()
         if "</think>" in cleaned:
             cleaned = cleaned.split("</think>", 1)[-1].strip()
@@ -195,69 +248,71 @@ class SoftTemporalShotQueryAnalyzer:
             return cleaned[start : end + 1].strip()
         return cleaned
 
-    @staticmethod
-    def _as_str(value: Any) -> str:
-        return "" if value is None else str(value).strip()
+    def _run_json_prompt(self, system_prompt: str, user_text: str) -> dict[str, Any]:
+        prompt = self._build_prompt(system_prompt, user_text)
+        raw_output = self._generate(prompt)
+        json_text = self._extract_json_payload(raw_output)
+        return json.loads(json_text)
 
-    def _normalize_stage(self, stage: Any) -> StageQuery | None:
+    @staticmethod
+    def _normalize_stage_item(stage: Any) -> dict[str, str] | None:
         if not isinstance(stage, dict):
             return None
-        stage_query = StageQuery(
-            visual=self._as_str(stage.get("visual", "")),
-            ocr=self._as_str(stage.get("ocr", "")),
-            subtitle=self._as_str(stage.get("subtitle", "")),
-        )
-        if stage_query.is_empty():
+        visual = str(stage.get("visual", "")).strip()
+        ocr = str(stage.get("ocr", "")).strip()
+        subtitle = str(stage.get("subtitle", stage.get("dialogue", ""))).strip()
+        if not any([visual, ocr, subtitle]):
             return None
-        return stage_query
+        return {
+            "visual": visual,
+            "ocr": ocr,
+            "subtitle": subtitle,
+        }
+
+    def translate_query(self, vi_query: str) -> str:
+        result = self._run_json_prompt(TRANSLATION_SYSTEM_PROMPT, vi_query)
+        return str(result.get("en_query", "")).strip()
+
+    def analyze_stages(self, vi_query: str) -> list[dict[str, str]]:
+        result = self._run_json_prompt(STAGE_SYSTEM_PROMPT, vi_query)
+        stages = result.get("stages", [])
+        if not isinstance(stages, list):
+            raise ValueError("Model output does not contain a valid stages list.")
+        normalized = []
+        for stage in stages:
+            item = self._normalize_stage_item(stage)
+            if item is not None:
+                normalized.append(item)
+        return self._merge_adjacent_duplicate_stages(normalized)
 
     @staticmethod
-    def _merge_adjacent_duplicate_stages(stages: list[StageQuery]) -> list[StageQuery]:
+    def _merge_adjacent_duplicate_stages(stages: list[dict[str, str]]) -> list[dict[str, str]]:
         if not stages:
             return []
-        merged = [stages[0]]
+        merged = [dict(stages[0])]
         for stage in stages[1:]:
             prev = merged[-1]
             if stage == prev:
                 continue
-            merged.append(stage)
+            if (
+                stage.get("visual", "") == prev.get("visual", "")
+                and stage.get("ocr", "") == prev.get("ocr", "")
+                and stage.get("subtitle", "")
+                and prev.get("subtitle", "")
+                and stage.get("subtitle", "") == prev.get("subtitle", "")
+            ):
+                prev["subtitle"] = f"{prev['subtitle']}, {stage['subtitle']}"
+                continue
+            merged.append(dict(stage))
         return merged
 
-    def normalize_result(self, parsed: Any) -> dict[str, Any] | None:
-        if not isinstance(parsed, dict):
-            return None
-        en_query = self._as_str(parsed.get("en_query", ""))
-        stages_payload = parsed.get("stages", [])
-        if not isinstance(stages_payload, list):
-            return None
-        stages = []
-        for item in stages_payload:
-            normalized = self._normalize_stage(item)
-            if normalized is not None:
-                stages.append(normalized)
-        stages = self._merge_adjacent_duplicate_stages(stages)
-        if not en_query and not stages:
-            return None
-        return {
+    def analyze(self, vi_query: str, return_raw: bool = False) -> dict[str, Any]:
+        en_query = self.translate_query(vi_query)
+        stages = self.analyze_stages(vi_query)
+        result: dict[str, Any] = {
             "en_query": en_query,
-            "stages": [
-                {
-                    "visual": stage.visual,
-                    "ocr": stage.ocr,
-                    "subtitle": stage.subtitle,
-                }
-                for stage in stages
-            ],
+            "stages": stages,
         }
-
-    def analyze(self, query: str, return_raw: bool = False) -> dict[str, Any] | None:
-        prompt_text = self.build_prompt(query)
-        raw_output = self.generate_text(prompt_text)
-        json_text = self.extract_json_payload(raw_output)
-        parsed = json.loads(json_text)
-        normalized = self.normalize_result(parsed)
-        if normalized is None:
-            raise ValueError("Query analyzer returned no usable JSON result.")
         if return_raw:
-            normalized["_raw_output"] = raw_output
-        return normalized
+            result["_raw_output"] = None
+        return result
