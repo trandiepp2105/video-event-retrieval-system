@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
+from .common import load_json, save_json
 from .config import BuildConfig, SearchConfig
 
 
@@ -109,6 +111,111 @@ def _print_pooling_summary(result: dict) -> None:
             )
 
 
+def _build_search_config_from_args(args, *, raw_query: str, output_json: Path | None = None) -> SearchConfig:
+    return SearchConfig(
+        store_dir=args.store_dir,
+        query_json=None,
+        raw_query=raw_query,
+        translated_query=args.translated_query,
+        subtitle_query=args.subtitle_query,
+        ocr_query=args.ocr_query,
+        clip_model_path=args.clip_model_path,
+        clip_model_name=args.clip_model_name,
+        caption_model_path=args.caption_model_path,
+        subtitle_model_path=args.subtitle_model_path,
+        subtitle_backend=args.subtitle_backend,
+        event_top_k=args.event_top_k,
+        caption_top_k=args.caption_top_k,
+        subtitle_top_k=args.subtitle_top_k,
+        ocr_top_k=args.ocr_top_k,
+        candidate_event_top_k=args.candidate_event_top_k,
+        candidate_video_top_k=args.candidate_video_top_k,
+        shot_top_k=args.shot_top_k,
+        final_top_k=args.final_top_k,
+        rrf_k=args.rrf_k,
+        event_weight=args.event_weight,
+        caption_weight=args.caption_weight,
+        subtitle_weight=args.subtitle_weight,
+        ocr_weight=args.ocr_weight,
+        shot_weight=args.shot_weight,
+        parent_event_weight=args.parent_event_weight,
+        visual_device=args.visual_device,
+        caption_device=args.caption_device,
+        subtitle_device=args.subtitle_device,
+        enable_shot_temporal=args.enable_shot_temporal,
+        temporal_query_model_path=args.temporal_query_model_path,
+        temporal_query_device_map=args.temporal_query_device_map,
+        temporal_query_torch_dtype=args.temporal_query_torch_dtype,
+        temporal_query_max_new_tokens=args.temporal_query_max_new_tokens,
+        stage_shot_top_k=args.stage_shot_top_k,
+        temporal_chain_top_k=args.temporal_chain_top_k,
+        stage_visual_weight=args.stage_visual_weight,
+        stage_ocr_weight=args.stage_ocr_weight,
+        stage_subtitle_weight=args.stage_subtitle_weight,
+        temporal_window_shots=args.temporal_window_shots,
+        temporal_group_gap_shots=args.temporal_group_gap_shots,
+        temporal_min_stage_gap_shots=args.temporal_min_stage_gap_shots,
+        temporal_lambda_skip=args.temporal_lambda_skip,
+        meilisearch_url=args.meilisearch_url,
+        meilisearch_index_name=args.meilisearch_index_name,
+        subtitle_meilisearch_index_name=args.subtitle_meilisearch_index_name,
+        meilisearch_api_key=args.meilisearch_api_key,
+        output_json=output_json,
+    )
+
+
+def _summarize_pooling_batch_result(
+    *,
+    query_item: dict[str, Any],
+    result: dict[str, Any],
+    top_k: int,
+) -> dict[str, Any]:
+    return {
+        "video_id": str(query_item.get("video_id", "")),
+        "query": str(query_item.get("query", "")),
+        "start_time_sec": query_item.get("start_time_sec"),
+        "end_time_sec": query_item.get("end_time_sec"),
+        "query_analysis": result.get("shot_temporal", {}).get("query_analysis"),
+        "top_event_candidates": result.get("candidates", {}).get("top_events", [])[:top_k],
+        "top_shot_candidates": result.get("shot_level", {}).get("top_shots", [])[:top_k],
+        "top_shot_chains": result.get("shot_temporal", {}).get("top_chains", [])[:top_k],
+        "final_events": result.get("final_events", [])[:top_k],
+    }
+
+
+def _run_pooling_batch_search(args) -> dict[str, Any]:
+    from .retrieval import PoolingMovieEventRetriever
+
+    retriever = PoolingMovieEventRetriever(_load_metadata(args.store_dir), args.store_dir)
+    payload = load_json(args.queries_json)
+    if not isinstance(payload, list):
+        raise ValueError("queries_json must contain a list of query objects")
+
+    results: list[dict[str, Any]] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            continue
+        raw_query = str(item.get("query", "")).strip()
+        if not raw_query:
+            continue
+        print(f"[{index + 1}/{len(payload)}] Searching pooling query for video_id={item.get('video_id', '')}")
+        result = retriever.search(_build_search_config_from_args(args, raw_query=raw_query, output_json=None))
+        results.append(
+            _summarize_pooling_batch_result(
+                query_item=item,
+                result=result,
+                top_k=args.batch_result_top_k,
+            )
+        )
+    output_payload = {
+        "num_queries": len(results),
+        "top_k": int(args.batch_result_top_k),
+        "results": results,
+    }
+    save_json(output_payload, args.output_json)
+    return output_payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pooling movie event retrieval CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -193,11 +300,60 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
     search.add_argument("--meilisearch_api_key", type=str, default=None)
     search.add_argument("--output_json", type=Path, default=None)
+
+    search_batch = subparsers.add_parser("search-batch")
+    search_batch.add_argument("--store_dir", type=Path, required=True)
+    search_batch.add_argument("--queries_json", type=Path, required=True)
+    search_batch.add_argument("--translated_query", type=str, default="")
+    search_batch.add_argument("--subtitle_query", type=str, default="")
+    search_batch.add_argument("--ocr_query", type=str, default="")
+    search_batch.add_argument("--clip_model_path", type=Path, default=None)
+    search_batch.add_argument("--clip_model_name", type=str, default="ViT-H-14-quickgelu")
+    search_batch.add_argument("--caption_model_path", type=str, default=None)
+    search_batch.add_argument("--subtitle_model_path", type=str, default=None)
+    search_batch.add_argument("--subtitle_backend", type=str, default="meilisearch", choices=["meilisearch", "embedding"])
+    search_batch.add_argument("--event_top_k", type=int, default=200)
+    search_batch.add_argument("--caption_top_k", type=int, default=200)
+    search_batch.add_argument("--subtitle_top_k", type=int, default=200)
+    search_batch.add_argument("--ocr_top_k", type=int, default=200)
+    search_batch.add_argument("--candidate_event_top_k", type=int, default=100)
+    search_batch.add_argument("--candidate_video_top_k", type=int, default=30)
+    search_batch.add_argument("--shot_top_k", type=int, default=100)
+    search_batch.add_argument("--final_top_k", type=int, default=30)
+    search_batch.add_argument("--rrf_k", type=int, default=60)
+    search_batch.add_argument("--event_weight", type=float, default=1.0)
+    search_batch.add_argument("--caption_weight", type=float, default=0.8)
+    search_batch.add_argument("--subtitle_weight", type=float, default=0.6)
+    search_batch.add_argument("--ocr_weight", type=float, default=0.4)
+    search_batch.add_argument("--shot_weight", type=float, default=0.8)
+    search_batch.add_argument("--parent_event_weight", type=float, default=0.2)
+    search_batch.add_argument("--visual_device", type=str, default="cpu")
+    search_batch.add_argument("--caption_device", type=str, default="cpu")
+    search_batch.add_argument("--subtitle_device", type=str, default="cpu")
+    search_batch.add_argument("--enable_shot_temporal", action="store_true")
+    search_batch.add_argument("--temporal_query_model_path", type=str, default=None)
+    search_batch.add_argument("--temporal_query_device_map", type=str, default="auto")
+    search_batch.add_argument("--temporal_query_torch_dtype", type=str, default="auto")
+    search_batch.add_argument("--temporal_query_max_new_tokens", type=int, default=768)
+    search_batch.add_argument("--stage_shot_top_k", type=int, default=100)
+    search_batch.add_argument("--temporal_chain_top_k", type=int, default=100)
+    search_batch.add_argument("--stage_visual_weight", type=float, default=0.45)
+    search_batch.add_argument("--stage_ocr_weight", type=float, default=0.35)
+    search_batch.add_argument("--stage_subtitle_weight", type=float, default=0.20)
+    search_batch.add_argument("--temporal_window_shots", type=int, default=3)
+    search_batch.add_argument("--temporal_group_gap_shots", type=int, default=12)
+    search_batch.add_argument("--temporal_min_stage_gap_shots", type=int, default=1)
+    search_batch.add_argument("--temporal_lambda_skip", type=float, default=0.7)
+    search_batch.add_argument("--meilisearch_url", type=str, default=None)
+    search_batch.add_argument("--meilisearch_index_name", type=str, default=None)
+    search_batch.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
+    search_batch.add_argument("--meilisearch_api_key", type=str, default=None)
+    search_batch.add_argument("--batch_result_top_k", type=int, default=100)
+    search_batch.add_argument("--output_json", type=Path, required=True)
     return parser
 
 
 def _load_metadata(store_dir: Path):
-    from .common import load_json
     from .metadata import MetadataRepository
     from .schemas import (
         EventRecord,
@@ -359,3 +515,13 @@ def main() -> None:
             )
         )
         _print_pooling_summary(result)
+        return
+
+    if args.command == "search-batch":
+        output_payload = _run_pooling_batch_search(args)
+        print(
+            "Batch search complete\n"
+            f"  queries: {output_payload['num_queries']}\n"
+            f"  top_k: {output_payload['top_k']}\n"
+            f"  output_json: {args.output_json}"
+        )

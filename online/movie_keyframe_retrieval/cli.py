@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 from .encoders import OpenClipTextEncoder
 from .io_utils import load_json, save_json
@@ -127,6 +128,90 @@ def _print_keyframe_query_payload(payload: dict) -> None:
         _print_keyframe_stage_results(formatted, limit=10)
 
 
+def _run_keyframe_query_search(engine: SearchEngine, analyzer: MovieQueryAnalyzer, args, raw_query: str) -> dict[str, Any]:
+    analyzed = analyzer.analyze(raw_query, return_raw=False)
+    if analyzed:
+        stage_queries = analyzer.to_search_queries(analyzed)
+    else:
+        stage_queries = [{"visual": raw_query, "ocr": "", "subtitle": ""}]
+    subtitle_hits_by_stage = []
+    ocr_hits_by_stage = []
+    for stage_query in stage_queries:
+        subtitle_text = str(stage_query.get("subtitle", "")).strip()
+        ocr_text = str(stage_query.get("ocr", "")).strip()
+        if subtitle_text:
+            subtitle_hits_by_stage.append(engine.ocr_engine.search_subtitle(subtitle_text, 10))
+        if ocr_text:
+            ocr_hits_by_stage.append(engine.ocr_engine.search_ocr(ocr_text, 10))
+    if len(stage_queries) <= 1:
+        stage_query = stage_queries[0] if stage_queries else {"visual": raw_query, "ocr": "", "subtitle": ""}
+        retrieval_stage_query = {
+            "text": stage_query.get("visual"),
+            "ocr": stage_query.get("ocr"),
+            "subtitle": stage_query.get("subtitle"),
+        }
+        weights = engine._build_stage_weights(retrieval_stage_query)
+        results = engine.hybrid_search(
+            text_query=retrieval_stage_query.get("text"),
+            ocr_query=retrieval_stage_query.get("ocr"),
+            subtitle_query=retrieval_stage_query.get("subtitle"),
+            k=args.top_k,
+            weights=weights,
+        )
+        return {
+            "query": raw_query,
+            "analyzed": analyzed,
+            "stage_queries": stage_queries,
+            "subtitle_hits_by_stage": subtitle_hits_by_stage,
+            "ocr_hits_by_stage": ocr_hits_by_stage,
+            "mode": "single-stage",
+            "results": results,
+        }
+    results = engine.temporal_search(
+        queries=[
+            {
+                "text": stage_query.get("visual", ""),
+                "ocr": stage_query.get("ocr", ""),
+                "subtitle": stage_query.get("subtitle", ""),
+            }
+            for stage_query in stage_queries
+        ],
+        k=args.top_k,
+        initial_search_k=args.initial_search_k,
+        frame_distance=args.frame_distance,
+        window_size_frames=args.window_size_frames,
+        lambda_skip=args.lambda_skip,
+        min_stage_gap=args.min_stage_gap,
+    )
+    return {
+        "query": raw_query,
+        "analyzed": analyzed,
+        "stage_queries": stage_queries,
+        "subtitle_hits_by_stage": subtitle_hits_by_stage,
+        "ocr_hits_by_stage": ocr_hits_by_stage,
+        "mode": "multi-stage",
+        "results": results,
+    }
+
+
+def _summarize_keyframe_batch_result(
+    *,
+    query_item: dict[str, Any],
+    payload: dict[str, Any],
+    top_k: int,
+) -> dict[str, Any]:
+    return {
+        "video_id": str(query_item.get("video_id", "")),
+        "query": str(query_item.get("query", "")),
+        "start_time_sec": query_item.get("start_time_sec"),
+        "end_time_sec": query_item.get("end_time_sec"),
+        "mode": payload.get("mode", ""),
+        "analyzed": payload.get("analyzed"),
+        "stage_queries": payload.get("stage_queries", []),
+        "results": (payload.get("results") or [])[:top_k],
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Movie event retrieval system CLI (current mode: keyframe retrieval)"
@@ -234,6 +319,34 @@ def build_parser() -> argparse.ArgumentParser:
     search_query.add_argument("--lambda_skip", type=float, default=0.7)
     search_query.add_argument("--min_stage_gap", type=int, default=30)
     search_query.add_argument("--output_json", type=Path, default=None)
+
+    search_batch = subparsers.add_parser("search-batch")
+    search_batch.add_argument("--visual_index_dir", type=Path, nargs="+", required=True)
+    search_batch.add_argument("--clip_model_path", type=Path, nargs="+", required=True)
+    search_batch.add_argument("--clip_model_name", type=str, nargs="*", default=None)
+    search_batch.add_argument("--visual_index_names", type=str, nargs="*", default=None)
+    search_batch.add_argument("--queries_json", type=Path, required=True)
+    search_batch.add_argument("--llm_model_path", type=str, required=True)
+    search_batch.add_argument("--llm_system_prompt", type=str, default=DEFAULT_SYSTEM_PROMPT)
+    search_batch.add_argument("--llm_device_map", type=str, default="auto")
+    search_batch.add_argument("--llm_torch_dtype", type=str, default="auto")
+    search_batch.add_argument("--llm_max_new_tokens", type=int, default=768)
+    search_batch.add_argument("--llm_load_in_4bit", action="store_true")
+    search_batch.add_argument("--llm_load_in_8bit", action="store_true")
+    search_batch.add_argument("--llm_bnb_8bit_cpu_offload", action="store_true")
+    search_batch.add_argument("--visual_device", type=str, nargs="*", default=None)
+    search_batch.add_argument("--meilisearch_url", type=str, required=True)
+    search_batch.add_argument("--meilisearch_api_key", type=str, required=True)
+    search_batch.add_argument("--ocr_index_name", type=str, required=True)
+    search_batch.add_argument("--subtitle_index_name", type=str, required=True)
+    search_batch.add_argument("--top_k", type=int, default=100)
+    search_batch.add_argument("--initial_search_k", type=int, default=2048)
+    search_batch.add_argument("--frame_distance", type=int, default=1500)
+    search_batch.add_argument("--window_size_frames", type=int, default=100)
+    search_batch.add_argument("--lambda_skip", type=float, default=0.7)
+    search_batch.add_argument("--min_stage_gap", type=int, default=30)
+    search_batch.add_argument("--batch_result_top_k", type=int, default=100)
+    search_batch.add_argument("--output_json", type=Path, required=True)
 
     return parser
 
@@ -456,70 +569,52 @@ def main() -> None:
             load_in_8bit=args.llm_load_in_8bit,
             bnb_8bit_cpu_offload=args.llm_bnb_8bit_cpu_offload,
         )
-        analyzed = analyzer.analyze(args.raw_query, return_raw=False)
-        if analyzed:
-            stage_queries = analyzer.to_search_queries(analyzed)
-        else:
-            stage_queries = [{"visual": args.raw_query, "ocr": "", "subtitle": ""}]
-        subtitle_hits_by_stage = []
-        ocr_hits_by_stage = []
-        for stage_query in stage_queries:
-            subtitle_text = str(stage_query.get("subtitle", "")).strip()
-            ocr_text = str(stage_query.get("ocr", "")).strip()
-            if subtitle_text:
-                subtitle_hits_by_stage.append(engine.ocr_engine.search_subtitle(subtitle_text, 10))
-            if ocr_text:
-                ocr_hits_by_stage.append(engine.ocr_engine.search_ocr(ocr_text, 10))
-        if len(stage_queries) <= 1:
-            stage_query = stage_queries[0] if stage_queries else {"visual": args.raw_query, "ocr": "", "subtitle": ""}
-            retrieval_stage_query = {
-                "text": stage_query.get("visual"),
-                "ocr": stage_query.get("ocr"),
-                "subtitle": stage_query.get("subtitle"),
-            }
-            weights = engine._build_stage_weights(retrieval_stage_query)
-            results = engine.hybrid_search(
-                text_query=retrieval_stage_query.get("text"),
-                ocr_query=retrieval_stage_query.get("ocr"),
-                subtitle_query=retrieval_stage_query.get("subtitle"),
-                k=args.top_k,
-                weights=weights,
-            )
-            payload = {
-                "query": args.raw_query,
-                "analyzed": analyzed,
-                "stage_queries": stage_queries,
-                "subtitle_hits_by_stage": subtitle_hits_by_stage,
-                "ocr_hits_by_stage": ocr_hits_by_stage,
-                "mode": "single-stage",
-                "results": results,
-            }
-        else:
-            results = engine.temporal_search(
-                queries=[
-                    {
-                        "text": stage_query.get("visual", ""),
-                        "ocr": stage_query.get("ocr", ""),
-                        "subtitle": stage_query.get("subtitle", ""),
-                    }
-                    for stage_query in stage_queries
-                ],
-                k=args.top_k,
-                initial_search_k=args.initial_search_k,
-                frame_distance=args.frame_distance,
-                window_size_frames=args.window_size_frames,
-                lambda_skip=args.lambda_skip,
-                min_stage_gap=args.min_stage_gap,
-            )
-            payload = {
-                "query": args.raw_query,
-                "analyzed": analyzed,
-                "stage_queries": stage_queries,
-                "subtitle_hits_by_stage": subtitle_hits_by_stage,
-                "ocr_hits_by_stage": ocr_hits_by_stage,
-                "mode": "multi-stage",
-                "results": results,
-            }
+        payload = _run_keyframe_query_search(engine, analyzer, args, args.raw_query)
         _save_result_if_needed(payload, args.output_json)
         _print_keyframe_query_payload(payload)
+        return
+
+    if args.command == "search-batch":
+        engine = _build_search_engine(args)
+        analyzer = MovieQueryAnalyzer(
+            model_id=args.llm_model_path,
+            system_prompt=args.llm_system_prompt,
+            device_map=args.llm_device_map,
+            torch_dtype=args.llm_torch_dtype,
+            max_new_tokens=args.llm_max_new_tokens,
+            load_in_4bit=args.llm_load_in_4bit,
+            load_in_8bit=args.llm_load_in_8bit,
+            bnb_8bit_cpu_offload=args.llm_bnb_8bit_cpu_offload,
+        )
+        raw_payload = load_json(args.queries_json)
+        if not isinstance(raw_payload, list):
+            raise ValueError("queries_json must contain a list of query objects")
+        results = []
+        for index, item in enumerate(raw_payload):
+            if not isinstance(item, dict):
+                continue
+            raw_query = str(item.get("query", "")).strip()
+            if not raw_query:
+                continue
+            print(f"[{index + 1}/{len(raw_payload)}] Searching keyframe query for video_id={item.get('video_id', '')}")
+            payload = _run_keyframe_query_search(engine, analyzer, args, raw_query)
+            results.append(
+                _summarize_keyframe_batch_result(
+                    query_item=item,
+                    payload=payload,
+                    top_k=args.batch_result_top_k,
+                )
+            )
+        output_payload = {
+            "num_queries": len(results),
+            "top_k": int(args.batch_result_top_k),
+            "results": results,
+        }
+        save_json(output_payload, args.output_json)
+        print(
+            "Batch search complete\n"
+            f"  queries: {output_payload['num_queries']}\n"
+            f"  top_k: {output_payload['top_k']}\n"
+            f"  output_json: {args.output_json}"
+        )
         return
