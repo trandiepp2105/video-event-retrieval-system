@@ -52,12 +52,60 @@ def _print_keyframe_temporal_results(results: list, limit: int = 5) -> None:
             )
 
 
+def _truncate_text(text: str, limit: int = 120) -> str:
+    value = str(text).replace("\n", " ").strip()
+    if len(value) > limit:
+        return value[: limit - 3] + "..."
+    return value
+
+
+def _print_keyframe_text_hits(title: str, hits: list[dict], *, id_key: str, limit: int = 10) -> None:
+    print(f"{title}: {len(hits)}")
+    for idx, item in enumerate(hits[:limit], start=1):
+        print(
+            f"{idx:>2}. {id_key}={item.get(id_key, '')} "
+            f"score={float(item.get('_rankingScore', item.get('score', 0.0))):.4f} "
+            f"text={_truncate_text(item.get('text', ''))}"
+        )
+
+
+def _print_keyframe_aux_hits(engine: SearchEngine, *, subtitle_query: str = "", ocr_query: str = "") -> None:
+    if subtitle_query.strip():
+        subtitle_hits = engine.ocr_engine.search_subtitle(subtitle_query.strip(), 10)
+        print()
+        _print_keyframe_text_hits("Top subtitle result", subtitle_hits, id_key="subtitle_id", limit=10)
+    if ocr_query.strip():
+        ocr_hits = engine.ocr_engine.search_ocr(ocr_query.strip(), 10)
+        print()
+        _print_keyframe_text_hits("Top ocr result", ocr_hits, id_key="ocr_id", limit=10)
+
+
 def _print_keyframe_query_payload(payload: dict) -> None:
     print(f"Mode: {payload.get('mode', '')}")
     stage_queries = payload.get("stage_queries") or []
     print(f"Stages: {len(stage_queries)}")
     for idx, stage in enumerate(stage_queries, start=1):
         print(f"  Stage {idx}: {stage}")
+    subtitle_queries = [str(stage.get("subtitle", "")).strip() for stage in stage_queries if str(stage.get("subtitle", "")).strip()]
+    ocr_queries = [str(stage.get("ocr", "")).strip() for stage in stage_queries if str(stage.get("ocr", "")).strip()]
+    subtitle_hit_groups = payload.get("subtitle_hits_by_stage") or []
+    ocr_hit_groups = payload.get("ocr_hits_by_stage") or []
+    if subtitle_queries:
+        print("\nTop subtitle result")
+        if subtitle_hit_groups:
+            for idx, (query_text, hits) in enumerate(zip(subtitle_queries, subtitle_hit_groups), start=1):
+                print(f"  Stage {idx} query: {query_text}")
+                _print_keyframe_text_hits("  Hits", hits, id_key="subtitle_id", limit=5)
+        else:
+            print("  <empty>")
+    if ocr_queries:
+        print("\nTop ocr result")
+        if ocr_hit_groups:
+            for idx, (query_text, hits) in enumerate(zip(ocr_queries, ocr_hit_groups), start=1):
+                print(f"  Stage {idx} query: {query_text}")
+                _print_keyframe_text_hits("  Hits", hits, id_key="ocr_id", limit=5)
+        else:
+            print("  <empty>")
     results = payload.get("results") or []
     if payload.get("mode") == "multi-stage":
         _print_keyframe_temporal_results(results, limit=5)
@@ -363,6 +411,13 @@ def main() -> None:
         )
         payload = [item.to_dict() for item in results]
         _save_result_if_needed(payload, args.output_json)
+        _print_keyframe_aux_hits(
+            engine,
+            subtitle_query=args.subtitle_query,
+            ocr_query=args.ocr_query,
+        )
+        if args.subtitle_query or args.ocr_query:
+            print()
         _print_keyframe_stage_results(payload, limit=10)
         return
 
@@ -403,6 +458,15 @@ def main() -> None:
             stage_queries = analyzer.to_search_queries(analyzed)
         else:
             stage_queries = [{"text": args.raw_query}]
+        subtitle_hits_by_stage = []
+        ocr_hits_by_stage = []
+        for stage_query in stage_queries:
+            subtitle_text = str(stage_query.get("subtitle", "")).strip()
+            ocr_text = str(stage_query.get("ocr", "")).strip()
+            if subtitle_text:
+                subtitle_hits_by_stage.append(engine.ocr_engine.search_subtitle(subtitle_text, 10))
+            if ocr_text:
+                ocr_hits_by_stage.append(engine.ocr_engine.search_ocr(ocr_text, 10))
         if len(stage_queries) <= 1:
             stage_query = stage_queries[0] if stage_queries else {"text": args.raw_query}
             weights = engine._build_stage_weights(stage_query)
@@ -417,6 +481,8 @@ def main() -> None:
                 "query": args.raw_query,
                 "analyzed": analyzed,
                 "stage_queries": stage_queries,
+                "subtitle_hits_by_stage": subtitle_hits_by_stage,
+                "ocr_hits_by_stage": ocr_hits_by_stage,
                 "mode": "single-stage",
                 "results": results,
             }
@@ -434,6 +500,8 @@ def main() -> None:
                 "query": args.raw_query,
                 "analyzed": analyzed,
                 "stage_queries": stage_queries,
+                "subtitle_hits_by_stage": subtitle_hits_by_stage,
+                "ocr_hits_by_stage": ocr_hits_by_stage,
                 "mode": "multi-stage",
                 "results": results,
             }
