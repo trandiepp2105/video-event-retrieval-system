@@ -9,6 +9,7 @@ class ShotResult:
     shot_id: str
     event_id: str
     video_id: str
+    shot_order: int
     start_time_sec: float
     end_time_sec: float
     score: float

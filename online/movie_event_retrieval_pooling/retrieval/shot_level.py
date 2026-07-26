@@ -4,7 +4,7 @@ import numpy as np
 
 from ..mappings import MappingBundle
 from ..scoring import ScoreAccumulator, reciprocal_rank_score
-from ..schemas import OCRSearchHit, SearchHit
+from ..schemas import OCRSearchHit, SearchHit, ShotResult
 
 
 class ShotCandidateBuilder:
@@ -79,3 +79,81 @@ class ShotLevelFusionService:
 
     def allowed_faiss_ids(self, shot_item_ids: list[str], shot_mapping_ids) -> np.ndarray:
         return shot_mapping_ids.faiss_ids_from_item_ids(shot_item_ids)
+
+
+class StageShotSearchService:
+    def __init__(self, mappings: MappingBundle) -> None:
+        self.mappings = mappings
+
+    def fuse_stage_hits(
+        self,
+        *,
+        shot_hits: list[SearchHit],
+        subtitle_hits: list[SearchHit],
+        ocr_hits: list[OCRSearchHit],
+        allowed_shot_ids: set[str],
+        shot_weight: float,
+        subtitle_weight: float,
+        ocr_weight: float,
+        rrf_k: int,
+    ) -> ScoreAccumulator:
+        accumulator = ScoreAccumulator()
+
+        for hit in shot_hits:
+            if hit.item_id not in allowed_shot_ids:
+                continue
+            accumulator.add(
+                hit.item_id,
+                shot_weight * reciprocal_rank_score(hit.rank, rrf_k),
+                source="stage_shot_embedding",
+                payload={"rank": hit.rank, "score": hit.score},
+            )
+
+        for hit in subtitle_hits:
+            for ref in self.mappings.subtitle_mapping.shots_for_subtitle(hit.item_id):
+                if ref.shot_id not in allowed_shot_ids:
+                    continue
+                accumulator.add(
+                    ref.shot_id,
+                    subtitle_weight * reciprocal_rank_score(hit.rank, rrf_k) * ref.weight,
+                    source=f"stage_subtitle:{hit.item_id}",
+                    payload={"rank": hit.rank, "score": hit.score, "weight": ref.weight},
+                )
+
+        for hit in ocr_hits:
+            shot_id = self.mappings.ocr_mapping.shot_id_for_ocr(hit.ocr_id)
+            if shot_id not in allowed_shot_ids:
+                continue
+            accumulator.add(
+                shot_id,
+                ocr_weight * reciprocal_rank_score(hit.rank, rrf_k),
+                source=f"stage_ocr:{hit.ocr_id}",
+                payload={"rank": hit.rank, "score": hit.score, "text": hit.text},
+            )
+
+        return accumulator
+
+    @staticmethod
+    def to_shot_results(
+        *,
+        ranked_shots: list[tuple[str, float]],
+        evidence: dict[str, dict],
+        metadata,
+        top_k: int,
+    ) -> list[ShotResult]:
+        results: list[ShotResult] = []
+        for shot_id, score in ranked_shots[: int(top_k)]:
+            shot = metadata.shots[shot_id]
+            results.append(
+                ShotResult(
+                    shot_id=shot_id,
+                    event_id=shot.event_id,
+                    video_id=shot.video_id,
+                    shot_order=int(shot.shot_order),
+                    start_time_sec=float(shot.start_time_sec),
+                    end_time_sec=float(shot.end_time_sec),
+                    score=float(score),
+                    evidence=evidence.get(shot_id, {}),
+                )
+            )
+        return results

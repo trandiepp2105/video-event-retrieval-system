@@ -16,8 +16,8 @@ def _format_timecode(seconds: float) -> str:
 
 def _print_pooling_summary(result: dict) -> None:
     query = result.get("query", {})
-    print("Query")
-    print(f"  raw_query: {query.get('raw_query', '')}")
+    print("Raw query")
+    print(f"  {query.get('raw_query', '')}")
     if query.get("translated_query"):
         print(f"  translated_query: {query.get('translated_query', '')}")
     if query.get("subtitle_query"):
@@ -25,9 +25,24 @@ def _print_pooling_summary(result: dict) -> None:
     if query.get("ocr_query"):
         print(f"  ocr_query: {query.get('ocr_query', '')}")
 
-    final_events = result.get("final_events", [])
-    print(f"\nFinal events: {len(final_events)}")
-    for idx, item in enumerate(final_events[:10], start=1):
+    shot_temporal = result.get("shot_temporal", {})
+    analysis = shot_temporal.get("query_analysis") or {}
+    print("\nQuery analyzer")
+    if analysis:
+        if analysis.get("en_query"):
+            print(f"  en_query: {analysis['en_query']}")
+        stages = analysis.get("stages", [])
+        print(f"  num_stages: {len(stages)}")
+        for idx, stage in enumerate(stages, start=1):
+            print(f"  {idx:>2}. visual={stage.get('visual', '')}")
+            print(f"      ocr={stage.get('ocr', '')}")
+            print(f"      subtitle={stage.get('subtitle', '')}")
+    else:
+        print("  <empty>")
+
+    top_event_candidates = result.get("candidates", {}).get("top_events", [])
+    print(f"\nTop event candidate: {len(top_event_candidates)}")
+    for idx, item in enumerate(top_event_candidates[:10], start=1):
         print(
             f"{idx:>2}. video={item['video_id']} event={item['event_id']} "
             f"time={_format_timecode(item['start_time_sec'])}-{_format_timecode(item['end_time_sec'])} "
@@ -35,13 +50,27 @@ def _print_pooling_summary(result: dict) -> None:
         )
 
     top_shots = result.get('shot_level', {}).get('top_shots', [])
-    print(f"\nTop shots: {len(top_shots)}")
+    print(f"\nTop shot candidate: {len(top_shots)}")
     for idx, item in enumerate(top_shots[:10], start=1):
         print(
             f"{idx:>2}. video={item['video_id']} shot={item['shot_id']} event={item['event_id']} "
             f"time={_format_timecode(item['start_time_sec'])}-{_format_timecode(item['end_time_sec'])} "
             f"score={float(item['score']):.4f}"
         )
+
+    top_chains = shot_temporal.get("top_chains", [])
+    print(f"\nTop shot chain: {len(top_chains)}")
+    for idx, chain in enumerate(top_chains[:5], start=1):
+        print(
+            f"{idx:>2}. video={chain['video_id']} score={float(chain['score']):.4f} "
+            f"matched={chain['num_stages_matched']} skipped={chain['num_stages_skipped']}"
+        )
+        for item in chain.get("chain", []):
+            print(
+                f"    - stage={item['stage_index']} shot={item['shot_id']} event={item['event_id']} "
+                f"time={_format_timecode(item['start_time_sec'])}-{_format_timecode(item['end_time_sec'])} "
+                f"score={float(item['score']):.4f}"
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,6 +138,20 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--visual_device", type=str, default="cpu")
     search.add_argument("--caption_device", type=str, default="cpu")
     search.add_argument("--subtitle_device", type=str, default="cpu")
+    search.add_argument("--enable_shot_temporal", action="store_true")
+    search.add_argument("--temporal_query_model_path", type=str, default=None)
+    search.add_argument("--temporal_query_device_map", type=str, default="auto")
+    search.add_argument("--temporal_query_torch_dtype", type=str, default="auto")
+    search.add_argument("--temporal_query_max_new_tokens", type=int, default=768)
+    search.add_argument("--stage_shot_top_k", type=int, default=100)
+    search.add_argument("--temporal_chain_top_k", type=int, default=30)
+    search.add_argument("--stage_visual_weight", type=float, default=0.45)
+    search.add_argument("--stage_ocr_weight", type=float, default=0.35)
+    search.add_argument("--stage_subtitle_weight", type=float, default=0.20)
+    search.add_argument("--temporal_window_shots", type=int, default=3)
+    search.add_argument("--temporal_group_gap_shots", type=int, default=12)
+    search.add_argument("--temporal_min_stage_gap_shots", type=int, default=1)
+    search.add_argument("--temporal_lambda_skip", type=float, default=0.7)
     search.add_argument("--meilisearch_url", type=str, default=None)
     search.add_argument("--meilisearch_index_name", type=str, default=None)
     search.add_argument("--subtitle_meilisearch_index_name", type=str, default=None)
@@ -258,6 +301,20 @@ def main() -> None:
                 visual_device=args.visual_device,
                 caption_device=args.caption_device,
                 subtitle_device=args.subtitle_device,
+                enable_shot_temporal=args.enable_shot_temporal,
+                temporal_query_model_path=args.temporal_query_model_path,
+                temporal_query_device_map=args.temporal_query_device_map,
+                temporal_query_torch_dtype=args.temporal_query_torch_dtype,
+                temporal_query_max_new_tokens=args.temporal_query_max_new_tokens,
+                stage_shot_top_k=args.stage_shot_top_k,
+                temporal_chain_top_k=args.temporal_chain_top_k,
+                stage_visual_weight=args.stage_visual_weight,
+                stage_ocr_weight=args.stage_ocr_weight,
+                stage_subtitle_weight=args.stage_subtitle_weight,
+                temporal_window_shots=args.temporal_window_shots,
+                temporal_group_gap_shots=args.temporal_group_gap_shots,
+                temporal_min_stage_gap_shots=args.temporal_min_stage_gap_shots,
+                temporal_lambda_skip=args.temporal_lambda_skip,
                 meilisearch_url=args.meilisearch_url,
                 meilisearch_index_name=args.meilisearch_index_name,
                 subtitle_meilisearch_index_name=args.subtitle_meilisearch_index_name,

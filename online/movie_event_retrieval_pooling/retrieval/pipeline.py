@@ -12,14 +12,17 @@ from ..indexes.faiss import (
 )
 from ..mappings.serializer import MappingSerializer
 from ..metadata import MetadataRepository
+from ..query_analyzer import SoftTemporalShotQueryAnalyzer, StageQuery
 from .event_level import (
     EventLevelFusionService,
     OCRQueryExtractor,
 )
 from .shot_level import (
     ShotCandidateBuilder,
+    StageShotSearchService,
     ShotLevelFusionService,
 )
+from .shot_temporal import ShotTemporalChainService
 from ..schemas import EventResult, ShotResult
 
 from ..config import SearchConfig
@@ -103,8 +106,10 @@ class PoolingMovieEventRetriever:
             ranked_events = event_fusion.sorted_items()
             candidate_event_ids = [event_id for event_id, _score in ranked_events[: config.candidate_event_top_k]]
             candidate_video_ids = self._rank_videos_from_events(ranked_events)[: config.candidate_video_top_k]
+            top_event_candidates = self._format_event_candidates(ranked_events)
 
             shot_results: list[ShotResult] = []
+            temporal_payload: dict[str, Any] = {"enabled": bool(config.enable_shot_temporal), "query_analysis": None, "stage_results": [], "top_chains": []}
             if shot_query_vector is not None and candidate_event_ids:
                 candidate_shot_ids = ShotCandidateBuilder(self.mappings).build(
                     event_ids=candidate_event_ids,
@@ -129,11 +134,21 @@ class PoolingMovieEventRetriever:
                     parent_event_weight=config.parent_event_weight,
                 )
                 shot_results = self._format_shot_results(shot_fusion.sorted_items(), shot_fusion.evidence)
+                if config.enable_shot_temporal and query["raw_query"]:
+                    temporal_payload = self._run_shot_temporal_search(
+                        config=config,
+                        raw_query=query["raw_query"],
+                        candidate_shot_ids=candidate_shot_ids,
+                        visual_encoder=visual_encoder,
+                        subtitle_searcher=subtitle_searcher,
+                        ocr_searcher=ocr_searcher,
+                    )
 
             final_events = self._aggregate_final_events(
                 ranked_events=ranked_events,
                 shot_results=shot_results,
                 event_evidence=event_fusion.evidence,
+                temporal_payload=temporal_payload,
             )[: config.final_top_k]
 
             payload = {
@@ -147,10 +162,12 @@ class PoolingMovieEventRetriever:
                 "candidates": {
                     "event_ids": candidate_event_ids,
                     "video_ids": candidate_video_ids,
+                    "top_events": top_event_candidates[:20],
                 },
                 "shot_level": {
                     "top_shots": [shot.__dict__ for shot in shot_results[:20]],
                 },
+                "shot_temporal": temporal_payload,
                 "final_events": [self._event_result_to_dict(result) for result in final_events],
             }
             if config.output_json is not None:
@@ -213,11 +230,28 @@ class PoolingMovieEventRetriever:
                     shot_id=shot_id,
                     event_id=shot.event_id,
                     video_id=shot.video_id,
+                    shot_order=int(shot.shot_order),
                     start_time_sec=shot.start_time_sec,
                     end_time_sec=shot.end_time_sec,
                     score=float(score),
                     evidence=evidence.get(shot_id, {}),
                 )
+            )
+        return results
+
+    def _format_event_candidates(self, ranked_events: list[tuple[str, float]]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for event_id, score in ranked_events:
+            event = self.metadata.events[event_id]
+            results.append(
+                {
+                    "event_id": event_id,
+                    "video_id": event.video_id,
+                    "start_time_sec": float(event.start_time_sec),
+                    "end_time_sec": float(event.end_time_sec),
+                    "score": float(score),
+                    "shot_ids": list(event.shot_ids),
+                }
             )
         return results
 
@@ -227,6 +261,7 @@ class PoolingMovieEventRetriever:
         ranked_events: list[tuple[str, float]],
         shot_results: list[ShotResult],
         event_evidence: dict[str, dict[str, Any]],
+        temporal_payload: dict[str, Any] | None = None,
     ) -> list[EventResult]:
         shot_by_event: dict[str, list[ShotResult]] = {}
         for shot in shot_results:
@@ -235,6 +270,11 @@ class PoolingMovieEventRetriever:
         final_scores: dict[str, float] = dict(ranked_events)
         for event_id, shots in shot_by_event.items():
             final_scores[event_id] = final_scores.get(event_id, 0.0) + max(shot.score for shot in shots)
+
+        for chain in (temporal_payload or {}).get("top_chains", []):
+            for chain_item in chain.get("chain", []):
+                event_id = str(chain_item["event_id"])
+                final_scores[event_id] = final_scores.get(event_id, 0.0) + float(chain.get("score", 0.0))
 
         results: list[EventResult] = []
         for event_id, score in sorted(final_scores.items(), key=lambda item: item[1], reverse=True):
@@ -250,10 +290,118 @@ class PoolingMovieEventRetriever:
                     evidence={
                         "event_level": event_evidence.get(event_id, {}),
                         "top_shots": [shot.__dict__ for shot in sorted(shot_by_event.get(event_id, []), key=lambda item: item.score, reverse=True)[:5]],
+                        "temporal_chains": [
+                            chain
+                            for chain in (temporal_payload or {}).get("top_chains", [])
+                            if any(str(item["event_id"]) == event_id for item in chain.get("chain", []))
+                        ][:3],
                     },
                 )
             )
         return results
+
+    def _run_shot_temporal_search(
+        self,
+        *,
+        config: SearchConfig,
+        raw_query: str,
+        candidate_shot_ids: list[str],
+        visual_encoder: OpenClipQueryEncoder | None,
+        subtitle_searcher: SubtitleSearcher | None,
+        ocr_searcher: OCRSearcher,
+    ) -> dict[str, Any]:
+        if not config.temporal_query_model_path:
+            raise ValueError("temporal_query_model_path is required when enable_shot_temporal=True")
+        analyzer = SoftTemporalShotQueryAnalyzer(
+            config.temporal_query_model_path,
+            device_map=config.temporal_query_device_map,
+            torch_dtype=config.temporal_query_torch_dtype,
+            max_new_tokens=config.temporal_query_max_new_tokens,
+        )
+        analyzed = analyzer.analyze(raw_query)
+        if not analyzed:
+            return {"enabled": True, "query_analysis": None, "stage_results": [], "top_chains": []}
+
+        stages = [StageQuery.from_dict(item) for item in analyzed.get("stages", [])]
+        stages = [stage for stage in stages if not stage.is_empty()]
+        if not stages:
+            return {"enabled": True, "query_analysis": analyzed, "stage_results": [], "top_chains": []}
+
+        allowed_shot_ids = set(candidate_shot_ids)
+        allowed_faiss_ids = self.mappings.shot_mapping.faiss_ids_from_item_ids(candidate_shot_ids)
+        stage_service = StageShotSearchService(self.mappings)
+        per_stage_results: list[list[ShotResult]] = []
+
+        for stage_index, stage in enumerate(stages):
+            shot_hits = []
+            if stage.visual and visual_encoder is not None:
+                query_vector = visual_encoder.encode(stage.visual)
+                scores, faiss_ids = self.subset_searcher.search(
+                    self.shot_index,
+                    query_vector,
+                    allowed_faiss_ids,
+                    config.stage_shot_top_k,
+                )
+                shot_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.shot_mapping)
+
+            subtitle_hits = []
+            if stage.subtitle:
+                if subtitle_searcher is not None:
+                    subtitle_hits = subtitle_searcher.search(stage.subtitle, config.subtitle_top_k)
+                elif config.subtitle_backend != "meilisearch":
+                    subtitle_encoder = self._build_subtitle_encoder(config, stage.subtitle)
+                    if subtitle_encoder is not None:
+                        subtitle_query = subtitle_encoder.encode(stage.subtitle)
+                        scores, faiss_ids = self.full_searcher.search(self.subtitle_index, subtitle_query, config.subtitle_top_k)
+                        subtitle_hits = self.hit_mapper.map_hits(scores, faiss_ids, self.mappings.subtitle_mapping_ids)
+
+            ocr_hits = []
+            if stage.ocr:
+                ocr_hits = ocr_searcher.search(stage.ocr, config.ocr_top_k)
+
+            fused = stage_service.fuse_stage_hits(
+                shot_hits=shot_hits,
+                subtitle_hits=subtitle_hits,
+                ocr_hits=ocr_hits,
+                allowed_shot_ids=allowed_shot_ids,
+                shot_weight=config.stage_visual_weight,
+                subtitle_weight=config.stage_subtitle_weight,
+                ocr_weight=config.stage_ocr_weight,
+                rrf_k=config.rrf_k,
+            )
+            stage_results = stage_service.to_shot_results(
+                ranked_shots=fused.sorted_items(),
+                evidence=fused.evidence,
+                metadata=self.metadata,
+                top_k=config.stage_shot_top_k,
+            )
+            per_stage_results.append(stage_results)
+
+        chains = ShotTemporalChainService(self.metadata).search(
+            stage_results=per_stage_results,
+            top_k=config.temporal_chain_top_k,
+            window_size_shots=config.temporal_window_shots,
+            lambda_skip=config.temporal_lambda_skip,
+            min_stage_gap_shots=config.temporal_min_stage_gap_shots,
+            group_gap_shots=config.temporal_group_gap_shots,
+        )
+        return {
+            "enabled": True,
+            "query_analysis": analyzed,
+            "stage_results": [
+                {
+                    "stage_index": stage_index,
+                    "query": {
+                        "visual": stages[stage_index].visual,
+                        "ocr": stages[stage_index].ocr,
+                        "subtitle": stages[stage_index].subtitle,
+                    },
+                    "top_shots": [shot.__dict__ for shot in results[:10]],
+                }
+                for stage_index, results in enumerate(per_stage_results)
+            ],
+            "top_chains": chains,
+        }
 
     @staticmethod
     def _event_result_to_dict(result: EventResult) -> dict[str, Any]:
