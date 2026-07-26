@@ -26,6 +26,7 @@ from ..indexes.ocr import (
 from ..mappings import MappingBundleBuilder
 from ..mappings.serializer import MappingSerializer
 from ..metadata import DatasetMetadataLoader, MetadataRepository
+from ..schemas import OCRRecord, SubtitleRecord
 
 
 def load_metadata_repository(config: BuildConfig) -> MetadataRepository:
