@@ -40,6 +40,42 @@ def _print_pooling_summary(result: dict) -> None:
     else:
         print("  <empty>")
 
+    subtitle_hits = result.get("event_level", {}).get("subtitle_hits", [])
+    has_subtitle_signal = bool(query.get("subtitle_query")) or any(
+        bool(str(stage.get("subtitle", "")).strip())
+        for stage in (analysis.get("stages", []) if isinstance(analysis, dict) else [])
+    )
+    if has_subtitle_signal:
+        print(f"\nTop subtitle result: {len(subtitle_hits)}")
+        for idx, item in enumerate(subtitle_hits[:10], start=1):
+            text = str(item.get("text", "")).replace("\n", " ").strip()
+            if len(text) > 120:
+                text = text[:117] + "..."
+            print(
+                f"{idx:>2}. subtitle_id={item.get('item_id', '')} "
+                f"score={float(item.get('score', 0.0)):.4f} "
+                f"rank={int(item.get('rank', 0))} "
+                f"text={text}"
+            )
+
+    ocr_hits = result.get("event_level", {}).get("ocr_hits", [])
+    has_ocr_signal = bool(query.get("ocr_query")) or any(
+        bool(str(stage.get("ocr", "")).strip())
+        for stage in (analysis.get("stages", []) if isinstance(analysis, dict) else [])
+    )
+    if has_ocr_signal:
+        print(f"\nTop ocr result: {len(ocr_hits)}")
+        for idx, item in enumerate(ocr_hits[:10], start=1):
+            text = str(item.get("text", "")).replace("\n", " ").strip()
+            if len(text) > 120:
+                text = text[:117] + "..."
+            print(
+                f"{idx:>2}. ocr_id={item.get('ocr_id', '')} "
+                f"score={float(item.get('score', 0.0)):.4f} "
+                f"rank={int(item.get('rank', 0))} "
+                f"text={text}"
+            )
+
     top_event_candidates = result.get("candidates", {}).get("top_events", [])
     print(f"\nTop event candidate: {len(top_event_candidates)}")
     for idx, item in enumerate(top_event_candidates[:10], start=1):
