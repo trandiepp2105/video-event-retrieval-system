@@ -44,26 +44,27 @@ class PoolingMovieEventRetriever:
         self.caption_index = self.index_loader.load(store_dir / "indexes" / "faiss" / "caption.faiss")
         self.shot_index = self.index_loader.load(store_dir / "indexes" / "faiss" / "shot.faiss")
         self.subtitle_index = self.index_loader.load(store_dir / "indexes" / "faiss" / "subtitle.faiss")
+        self._visual_encoder_cache: dict[tuple[Any, ...], OpenClipQueryEncoder] = {}
+        self._caption_encoder_cache: dict[tuple[Any, ...], SentenceTransformerQueryEncoder] = {}
+        self._subtitle_encoder_cache: dict[tuple[Any, ...], SentenceTransformerQueryEncoder] = {}
+        self._text_searcher_cache: dict[tuple[Any, ...], tuple[OCRSearcher, SubtitleSearcher | None]] = {}
+        self._temporal_query_analyzer_cache: dict[tuple[Any, ...], SoftTemporalShotQueryAnalyzer] = {}
 
     def search(self, config: SearchConfig) -> dict[str, Any]:
         query = self._load_query(config)
-        visual_encoder = None
-        caption_encoder = None
+        visual_encoder: OpenClipQueryEncoder | None = None
+        caption_encoder: SentenceTransformerQueryEncoder | None = None
 
         try:
             visual_query = query["translated_query"] or query["raw_query"]
             if visual_query:
                 if config.clip_model_path is None:
                     raise ValueError("clip_model_path is required when translated_query/raw_query is provided for visual search")
-                visual_encoder = OpenClipQueryEncoder(
-                    config.clip_model_path,
-                    model_name=config.clip_model_name,
-                    device=config.visual_device,
-                )
+                visual_encoder = self._get_visual_encoder(config)
             if query["raw_query"]:
                 if config.caption_model_path is None:
                     raise ValueError("caption_model_path is required when raw_query is provided")
-                caption_encoder = SentenceTransformerQueryEncoder(config.caption_model_path, device=config.caption_device)
+                caption_encoder = self._get_caption_encoder(config)
             subtitle_encoder = self._build_subtitle_encoder(config, query["subtitle_query"])
             ocr_searcher, subtitle_searcher = self._build_text_searchers(config)
 
@@ -177,6 +178,17 @@ class PoolingMovieEventRetriever:
             pass
 
     def _build_text_searchers(self, config: SearchConfig) -> tuple[OCRSearcher, SubtitleSearcher | None]:
+        cache_key = (
+            str(self.store_dir),
+            str(config.meilisearch_url or ""),
+            str(config.meilisearch_index_name or ""),
+            str(config.subtitle_meilisearch_index_name or ""),
+            str(config.meilisearch_api_key or ""),
+            str(config.subtitle_backend),
+        )
+        cached = self._text_searcher_cache.get(cache_key)
+        if cached is not None:
+            return cached
         ocr_config_path = self.store_dir / "indexes" / "ocr" / "config.json"
         ocr_config = load_json(ocr_config_path)
         meilisearch_url = config.meilisearch_url or str(ocr_config["url"])
@@ -190,17 +202,77 @@ class PoolingMovieEventRetriever:
             subtitle_config = load_json(self.store_dir / "indexes" / "subtitle_text" / "config.json")
             subtitle_index_name = config.subtitle_meilisearch_index_name or str(subtitle_config["index_name"])
             subtitle_searcher = SubtitleSearcher(client=client, index_uid=subtitle_index_name)
-        return OCRSearcher(client=client, index_uid=meilisearch_index_name), subtitle_searcher
+        result = (OCRSearcher(client=client, index_uid=meilisearch_index_name), subtitle_searcher)
+        self._text_searcher_cache[cache_key] = result
+        return result
 
-    @staticmethod
-    def _build_subtitle_encoder(config: SearchConfig, subtitle_query: str) -> SentenceTransformerQueryEncoder | None:
+    def _get_visual_encoder(self, config: SearchConfig) -> OpenClipQueryEncoder:
+        if config.clip_model_path is None:
+            raise ValueError("clip_model_path is required for visual search")
+        cache_key = (
+            str(config.clip_model_path),
+            str(config.clip_model_name),
+            str(config.visual_device),
+        )
+        cached = self._visual_encoder_cache.get(cache_key)
+        if cached is None:
+            cached = OpenClipQueryEncoder(
+                config.clip_model_path,
+                model_name=config.clip_model_name,
+                device=config.visual_device,
+            )
+            self._visual_encoder_cache[cache_key] = cached
+        return cached
+
+    def _get_caption_encoder(self, config: SearchConfig) -> SentenceTransformerQueryEncoder:
+        if config.caption_model_path is None:
+            raise ValueError("caption_model_path is required for caption search")
+        cache_key = (
+            str(config.caption_model_path),
+            str(config.caption_device),
+        )
+        cached = self._caption_encoder_cache.get(cache_key)
+        if cached is None:
+            cached = SentenceTransformerQueryEncoder(config.caption_model_path, device=config.caption_device)
+            self._caption_encoder_cache[cache_key] = cached
+        return cached
+
+    def _build_subtitle_encoder(self, config: SearchConfig, subtitle_query: str) -> SentenceTransformerQueryEncoder | None:
         if not subtitle_query:
             return None
         if config.subtitle_backend == "meilisearch":
             return None
         if config.subtitle_model_path is None:
             raise ValueError("subtitle_model_path is required when subtitle_backend=embedding and subtitle_query is provided")
-        return SentenceTransformerQueryEncoder(config.subtitle_model_path, device=config.subtitle_device)
+        cache_key = (
+            str(config.subtitle_model_path),
+            str(config.subtitle_device),
+        )
+        cached = self._subtitle_encoder_cache.get(cache_key)
+        if cached is None:
+            cached = SentenceTransformerQueryEncoder(config.subtitle_model_path, device=config.subtitle_device)
+            self._subtitle_encoder_cache[cache_key] = cached
+        return cached
+
+    def _get_temporal_query_analyzer(self, config: SearchConfig) -> SoftTemporalShotQueryAnalyzer:
+        if not config.temporal_query_model_path:
+            raise ValueError("temporal_query_model_path is required when enable_shot_temporal=True")
+        cache_key = (
+            str(config.temporal_query_model_path),
+            str(config.temporal_query_device_map),
+            str(config.temporal_query_torch_dtype),
+            int(config.temporal_query_max_new_tokens),
+        )
+        cached = self._temporal_query_analyzer_cache.get(cache_key)
+        if cached is None:
+            cached = SoftTemporalShotQueryAnalyzer(
+                config.temporal_query_model_path,
+                device_map=config.temporal_query_device_map,
+                torch_dtype=config.temporal_query_torch_dtype,
+                max_new_tokens=config.temporal_query_max_new_tokens,
+            )
+            self._temporal_query_analyzer_cache[cache_key] = cached
+        return cached
 
     def _load_query(self, config: SearchConfig) -> dict[str, str]:
         query = {
@@ -310,14 +382,7 @@ class PoolingMovieEventRetriever:
         subtitle_searcher: SubtitleSearcher | None,
         ocr_searcher: OCRSearcher,
     ) -> dict[str, Any]:
-        if not config.temporal_query_model_path:
-            raise ValueError("temporal_query_model_path is required when enable_shot_temporal=True")
-        analyzer = SoftTemporalShotQueryAnalyzer(
-            config.temporal_query_model_path,
-            device_map=config.temporal_query_device_map,
-            torch_dtype=config.temporal_query_torch_dtype,
-            max_new_tokens=config.temporal_query_max_new_tokens,
-        )
+        analyzer = self._get_temporal_query_analyzer(config)
         analyzed = analyzer.analyze(raw_query)
         if not analyzed:
             return {"enabled": True, "query_analysis": None, "stage_results": [], "top_chains": []}

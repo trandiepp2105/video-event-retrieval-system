@@ -13,6 +13,17 @@ from .schemas import StageQuery
 from .search import FAISSSearchEngine, SearchEngine
 
 
+class KeyframeQuerySearchSession:
+    def __init__(self, engine: SearchEngine, analyzer: MovieQueryAnalyzer | None = None) -> None:
+        self.engine = engine
+        self.analyzer = analyzer
+
+    def search_raw_query(self, args, raw_query: str) -> dict[str, Any]:
+        if self.analyzer is None:
+            raise ValueError("MovieQueryAnalyzer has not been initialized for raw query search.")
+        return _run_keyframe_query_search(self.engine, self.analyzer, args, raw_query)
+
+
 def _format_timecode_from_frame(frame_idx: int, fps: float = 25.0) -> str:
     total_seconds = max(float(frame_idx) / float(fps), 0.0)
     hours = int(total_seconds // 3600)
@@ -569,7 +580,8 @@ def main() -> None:
             load_in_8bit=args.llm_load_in_8bit,
             bnb_8bit_cpu_offload=args.llm_bnb_8bit_cpu_offload,
         )
-        payload = _run_keyframe_query_search(engine, analyzer, args, args.raw_query)
+        session = KeyframeQuerySearchSession(engine=engine, analyzer=analyzer)
+        payload = session.search_raw_query(args, args.raw_query)
         _save_result_if_needed(payload, args.output_json)
         _print_keyframe_query_payload(payload)
         return
@@ -586,6 +598,7 @@ def main() -> None:
             load_in_8bit=args.llm_load_in_8bit,
             bnb_8bit_cpu_offload=args.llm_bnb_8bit_cpu_offload,
         )
+        session = KeyframeQuerySearchSession(engine=engine, analyzer=analyzer)
         raw_payload = load_json(args.queries_json)
         if not isinstance(raw_payload, list):
             raise ValueError("queries_json must contain a list of query objects")
@@ -597,7 +610,7 @@ def main() -> None:
             if not raw_query:
                 continue
             print(f"[{index + 1}/{len(raw_payload)}] Searching keyframe query for video_id={item.get('video_id', '')}")
-            payload = _run_keyframe_query_search(engine, analyzer, args, raw_query)
+            payload = session.search_raw_query(args, raw_query)
             results.append(
                 _summarize_keyframe_batch_result(
                     query_item=item,
