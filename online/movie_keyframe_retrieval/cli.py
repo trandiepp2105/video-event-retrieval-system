@@ -82,6 +82,9 @@ def _print_keyframe_aux_hits(engine: SearchEngine, *, subtitle_query: str = "", 
 
 def _print_keyframe_query_payload(payload: dict) -> None:
     print(f"Mode: {payload.get('mode', '')}")
+    analyzed = payload.get("analyzed") or {}
+    if analyzed.get("en_query"):
+        print(f"English query: {analyzed.get('en_query', '')}")
     stage_queries = payload.get("stage_queries") or []
     print(f"Stages: {len(stage_queries)}")
     for idx, stage in enumerate(stage_queries, start=1):
@@ -457,7 +460,7 @@ def main() -> None:
         if analyzed:
             stage_queries = analyzer.to_search_queries(analyzed)
         else:
-            stage_queries = [{"text": args.raw_query}]
+            stage_queries = [{"visual": args.raw_query, "ocr": "", "subtitle": ""}]
         subtitle_hits_by_stage = []
         ocr_hits_by_stage = []
         for stage_query in stage_queries:
@@ -468,12 +471,17 @@ def main() -> None:
             if ocr_text:
                 ocr_hits_by_stage.append(engine.ocr_engine.search_ocr(ocr_text, 10))
         if len(stage_queries) <= 1:
-            stage_query = stage_queries[0] if stage_queries else {"text": args.raw_query}
-            weights = engine._build_stage_weights(stage_query)
+            stage_query = stage_queries[0] if stage_queries else {"visual": args.raw_query, "ocr": "", "subtitle": ""}
+            retrieval_stage_query = {
+                "text": stage_query.get("visual"),
+                "ocr": stage_query.get("ocr"),
+                "subtitle": stage_query.get("subtitle"),
+            }
+            weights = engine._build_stage_weights(retrieval_stage_query)
             results = engine.hybrid_search(
-                text_query=stage_query.get("text"),
-                ocr_query=stage_query.get("ocr"),
-                subtitle_query=stage_query.get("subtitle"),
+                text_query=retrieval_stage_query.get("text"),
+                ocr_query=retrieval_stage_query.get("ocr"),
+                subtitle_query=retrieval_stage_query.get("subtitle"),
                 k=args.top_k,
                 weights=weights,
             )
@@ -488,7 +496,14 @@ def main() -> None:
             }
         else:
             results = engine.temporal_search(
-                queries=stage_queries,
+                queries=[
+                    {
+                        "text": stage_query.get("visual", ""),
+                        "ocr": stage_query.get("ocr", ""),
+                        "subtitle": stage_query.get("subtitle", ""),
+                    }
+                    for stage_query in stage_queries
+                ],
                 k=args.top_k,
                 initial_search_k=args.initial_search_k,
                 frame_distance=args.frame_distance,

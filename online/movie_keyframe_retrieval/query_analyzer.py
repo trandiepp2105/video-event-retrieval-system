@@ -1,233 +1,122 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 
-DEFAULT_SYSTEM_PROMPT = r"""
+TRANSLATION_SYSTEM_PROMPT = r"""
+You are an expert Vietnamese-to-English translator for movie retrieval queries.
+
+Your job is to translate the full Vietnamese user query into natural English while preserving retrieval-critical meaning.
+
+Rules:
+1. Output JSON only.
+2. Return exactly one object with one field: {"en_query": "..."}.
+3. Translate the full query to English.
+4. Keep quoted dialogue, OCR text, names, titles, and proper nouns unchanged when appropriate.
+5. Do not explain anything.
+6. Do not add information not present in the query.
+7. If the query contains multiple actions in sequence, keep that sequence in the English translation.
+"""
+
+
+STAGE_SYSTEM_PROMPT = r"""
 You are an AI assistant for multilingual video retrieval query analysis.
 
-Analyze a natural-language movie/video search query and convert it into chronological retrieval stages for a multimodal retrieval system.
+Convert one Vietnamese movie/video search query into chronological retrieval stages for shot-level soft temporal retrieval.
 
-The system has the following channels:
+Each stage must represent one single action, one single event, or one single visual moment that can be independently searched.
 
-* visual: visible content for vision-language models such as CLIP or SigLIP.
-* dialogue: spoken words, subtitles, or meaningful human speech/audio.
-* ocr: static visible written text on objects, signs, papers, screens, phones, computers, logos, labels, etc.
-* metadata: explicitly named entities such as character names, actor names, movie titles, locations, organizations, genres, countries, or time periods.
-
-Return exactly one valid JSON object:
+Return exactly one valid JSON object with this schema:
 {
-"stages": [
-{
-"visual": "",
-"dialogue": "",
-"ocr": "",
-"metadata": {
-"character_names": [],
-"actor_names": [],
-"movie_title": "",
-"location": "",
-"organization": "",
-"genre": "",
-"country": "",
-"time_period": "",
-"other": []
-}
-}
-]
+  "stages": [
+    {
+      "visual": "",
+      "ocr": "",
+      "subtitle": ""
+    }
+  ]
 }
 
-General rules:
+Field meaning:
+- visual: only visible content, written in English. This is for visual retrieval.
+- ocr: exact visible written text only, keep original language, do not translate.
+- subtitle: exact spoken words, subtitle text, or dialogue only, keep original language, do not translate.
 
-1. Output JSON only. Do not use markdown or explanations.
-2. Use English for visual and metadata values.
-3. Do not translate dialogue, OCR text, or proper nouns.
-4. Use an empty string for missing string fields and an empty list for missing list fields.
-5. Do not invent information that is not stated or clearly implied by the query.
+Rules:
+1. Output JSON only.
+2. Do not use markdown.
+3. Do not invent details.
+4. Split temporal sequences into multiple stages in chronological order.
+5. Temporal connectors such as "sau đó", "rồi", "tiếp theo", "before", "after", "then" usually imply a stage boundary.
+6. A stage must be self-contained and concrete.
+7. visual must never contain spoken words or OCR text verbatim.
+8. subtitle must contain only dialogue/subtitle cues.
+9. If the query says that a person says, tells, asks, shouts, whispers, reads aloud, or repeats some words, then those spoken words must be put into subtitle, even if they are not surrounded by quotation marks.
+10. If the query explicitly gives the spoken content, preserve it in subtitle in the original language.
+11. Do not split one single visual situation into multiple stages only because the same person repeats the same or similar dialogue.
+12. Repeated speech such as "lag rồi, lag rồi" should remain inside one stage as one subtitle string, not be split into multiple duplicate stages.
+13. ocr must contain only exact visible written text. If not explicitly given, leave it empty.
+14. Use simple natural English in visual.
+15. If the query describes one single ongoing moment, return one stage only.
+16. If multiple consecutive stages happen in the same location, setting, room, vehicle, or scene context, later stages must inherit and restate that shared spatial context in visual.
+17. If there is no explicit change of place or scene, assume the later action still happens in the same space as the previous stage.
+18. A later stage must not drop important active scene context such as cafe, bus, classroom, office, bedroom, hospital room, art studio, restaurant, or street if that context still applies.
+19. When a person performs a new action inside the same scene, write the action together with the inherited context, for example: "a girl in an art studio opening her phone to read a message" instead of only "a girl opening her phone".
+20. If a later stage refers to an object or person from an earlier stage, rewrite that context concretely instead of using vague references.
 
-Field rules:
-
-6. The visual field must contain only information that can be directly observed visually, like a human describing an image. It should describe people, objects, actions, scenes, appearance, spatial relations, object states, facial expressions, body poses, and visible screen/media content.
-
-7. The dialogue field contains only spoken words, subtitles, quoted speech, or meaningful human speech/audio. If the exact words are provided, copy them verbatim. If the exact words are not provided, leave the dialogue field empty.
-
-8. The ocr field contains only exact visible written text. If the query says that text exists but does not provide the exact words, leave the ocr field empty and describe the text-bearing object in the visual field.
-
-9. The metadata field contains only explicitly named entities. Do not put generic descriptions such as "a man", "a woman", or "a girl" into metadata.
-
-10. Strictly separate visual, dialogue, and ocr. The visual field may describe visible speaking actions such as "shouting", "talking", "whispering", "singing", or "reading aloud", but it must never include the actual spoken words, quoted speech, subtitle text, OCR text, or their translation/paraphrase. Put exact spoken words only in dialogue and exact written words only in ocr.
-
-Stage splitting and context propagation:
-
-11. A stage is one independently retrievable visual moment. It should usually correspond to one main action, one scene state, or one keyframe-level event.
-
-12. If the query describes one single visual moment, return one stage. If it describes a temporal sequence, split it into multiple stages in chronological order.
-
-13. Temporal connectors such as "sau đó", "rồi", "tiếp theo", "kế tiếp", "trước khi", "sau khi", "then", "next", "after", or "before" usually indicate a stage boundary. When such connectors appear, default to splitting at that point unless the connected clauses clearly describe the same single visual moment. Do not keep temporally ordered actions in one visual field using words like "then", "after that", "rồi", or "sau đó".
-
-14. Split into a new stage when there is a clear change in the main visual moment, including changes in action, location, setting, visual focus, body pose, physical state, emotional state, object state, object location, ownership, visibility, camera view, close-up, flashback, memory, dream, imagination, or hallucinated scene.
-
-15. Split cause-result sequences into separate stages when the result is visually different from the cause, such as "vì ... nên ...", "dở quá nên ...", "thấy vậy nên ...", "sợ quá nên ...", or similar expressions.
-
-16. A stage may contain multiple objects or small simultaneous actions only if they belong to the same visual moment and support the same main action.
-
-17. Each stage must be self-contained and understandable without reading previous stages. If a later stage refers to something from an earlier stage, repeat only the necessary concrete context, including people, objects, actions, events, locations, ongoing situations, or visible media content.
-
-18. Replace vague references such as "it", "that", "this", "the scene", "the situation", "the event", "đó", "nó", "cảnh đó", "sự việc đó", "chỗ đó", "tấm ảnh đó", "dòng chữ đó", "món đó", "người đó", or "cái đó" with concrete visual descriptions.
-
-19. Do not make later stages too generic. Avoid outputs such as "a man speaking", "a girl crying", "a person entering the scene", or "someone reacting" if the query provides more concrete context.
-
-Translation and object accuracy:
-
-20. Translate Vietnamese visual descriptions into simple, common English.
-
-21. Preserve important concrete nouns such as tools, food, drinks, clothes, vehicles, animals, weapons, documents, screens, containers, and furniture.
-
-22. Do not replace a specific object with a different object or an overly generic object.
-
-23. If uncertain about an exact translation, use a broader but still correct phrase instead of an incorrect specific word.
-
-24. Avoid rare, fabricated, or hallucinated English words.
-
-Metadata classification:
-
-25. character_names: fictional character names explicitly mentioned.
-26. actor_names: actor / actress / public figure names explicitly mentioned.
-27. movie_title: movie title explicitly mentioned.
-28. location: explicit place or setting name.
-29. organization: explicit institution / sect / palace / clan / group / company name.
-30. genre: genre or style explicitly mentioned.
-31. country: country or nationality context explicitly mentioned.
-32. time_period: dynasty, era, historical period, modern / ancient context explicitly mentioned.
-33. other: other named metadata not covered above.
-
-Example 1
-
-Input: Tìm cảnh người đàn ông đang dùng điện thoại để chụp một cây nến đang cháy trên bàn, sau đó gửi tấm ảnh đó qua đoạn chat
-
+Example:
+Input: Người đàn ông nhìn vào điện thoại có dòng chữ "I miss you", rồi bật khóc.
 Output:
 {
-"stages": [
-{
-"visual": "a man using a phone to take a photo of a burning candle on a table",
-"dialogue": "",
-"ocr": "",
-"metadata": {
-"character_names": [],
-"actor_names": [],
-"movie_title": "",
-"location": "",
-"organization": "",
-"genre": "",
-"country": "",
-"time_period": "",
-"other": []
-}
-},
-{
-"visual": "a phone chat screen showing a photo of a burning candle on a table being sent",
-"dialogue": "",
-"ocr": "",
-"metadata": {
-"character_names": [],
-"actor_names": [],
-"movie_title": "",
-"location": "",
-"organization": "",
-"genre": "",
-"country": "",
-"time_period": "",
-"other": []
-}
-}
-]
+  "stages": [
+    {
+      "visual": "a man looking at a phone screen",
+      "ocr": "I miss you",
+      "subtitle": ""
+    },
+    {
+      "visual": "a man crying while looking at a phone screen",
+      "ocr": "I miss you",
+      "subtitle": ""
+    }
+  ]
 }
 
-Example 2
-
-Input: Người phụ nữ nhìn thấy trên màn hình điện thoại có dòng chữ "I miss you", rồi cô bật khóc
-
+Example:
+Input: Một cặp nam nữ ngồi đối diện nhau trong phòng vẽ, rồi cô gái nhận được tin nhắn và mở điện thoại ra xem.
 Output:
 {
-"stages": [
-{
-"visual": "a woman looking at a phone screen",
-"dialogue": "",
-"ocr": "I miss you",
-"metadata": {
-"character_names": [],
-"actor_names": [],
-"movie_title": "",
-"location": "",
-"organization": "",
-"genre": "",
-"country": "",
-"time_period": "",
-"other": []
-}
-},
-{
-"visual": "a woman crying while looking at a phone screen showing the message text",
-"dialogue": "",
-"ocr": "I miss you",
-"metadata": {
-"character_names": [],
-"actor_names": [],
-"movie_title": "",
-"location": "",
-"organization": "",
-"genre": "",
-"country": "",
-"time_period": "",
-"other": []
-}
-}
-]
+  "stages": [
+    {
+      "visual": "a couple sitting facing each other in an art studio",
+      "ocr": "",
+      "subtitle": ""
+    },
+    {
+      "visual": "a girl in an art studio opening her phone to read a message",
+      "ocr": "",
+      "subtitle": ""
+    }
+  ]
 }
 
-Example 3
-
-Input: Người đàn ông chỉ vào tờ giấy có chữ "CONFIDENTIAL", sau đó đọc to dòng chữ đó
-
+Example:
+Input: Một cô gái gọi điện video với bố khi đang ở trên một chuyến xe bus đông đúc, trong điện thoại người bố liên tục nói với con gái rằng lag rồi, lag rồi.
 Output:
 {
-"stages": [
-{
-"visual": "a man pointing at a paper document",
-"dialogue": "",
-"ocr": "CONFIDENTIAL",
-"metadata": {
-"character_names": [],
-"actor_names": [],
-"movie_title": "",
-"location": "",
-"organization": "",
-"genre": "",
-"country": "",
-"time_period": "",
-"other": []
-}
-},
-{
-"visual": "a man reading aloud from a paper document",
-"dialogue": "CONFIDENTIAL",
-"ocr": "CONFIDENTIAL",
-"metadata": {
-"character_names": [],
-"actor_names": [],
-"movie_title": "",
-"location": "",
-"organization": "",
-"genre": "",
-"country": "",
-"time_period": "",
-"other": []
-}
-}
-]
+  "stages": [
+    {
+      "visual": "a girl on a crowded bus having a video call with her father on a phone",
+      "ocr": "",
+      "subtitle": "lag rồi, lag rồi"
+    }
+  ]
 }
 """
+
+
+DEFAULT_SYSTEM_PROMPT = STAGE_SYSTEM_PROMPT
 
 
 class MovieQueryAnalyzer:
@@ -236,6 +125,7 @@ class MovieQueryAnalyzer:
         model_id: str,
         *,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        translation_system_prompt: str = TRANSLATION_SYSTEM_PROMPT,
         torch_dtype: str = "auto",
         device_map: str = "auto",
         max_new_tokens: int = 768,
@@ -248,9 +138,13 @@ class MovieQueryAnalyzer:
 
         self.torch = torch
         self.model_id = model_id
-        self.system_prompt = system_prompt
+        self.stage_system_prompt = system_prompt
+        self.translation_system_prompt = translation_system_prompt
         self.max_new_tokens = int(max_new_tokens)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         quantization_config = None
         if load_in_4bit:
@@ -269,30 +163,14 @@ class MovieQueryAnalyzer:
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model_id, **model_kwargs)
         self.model.eval()
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-    @staticmethod
-    def empty_metadata() -> dict[str, Any]:
-        return {
-            "character_names": [],
-            "actor_names": [],
-            "movie_title": "",
-            "location": "",
-            "organization": "",
-            "genre": "",
-            "country": "",
-            "time_period": "",
-            "other": [],
-        }
-
-    def build_prompt(self, query: str) -> str:
+    def _build_prompt(self, system_prompt: str, user_text: str) -> str:
         messages = [
             {
                 "role": "system",
-                "content": self.system_prompt + "\n\nDo not think step by step. Do not output <think>. Output the final JSON object only.",
+                "content": system_prompt + "\n\nDo not think step by step. Do not output <think>. Output the final JSON object only.",
             },
-            {"role": "user", "content": query.strip() + "\n\n/no_think"},
+            {"role": "user", "content": user_text.strip() + "\n\n/no_think"},
         ]
         if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template is not None:
             try:
@@ -323,7 +201,7 @@ class MovieQueryAnalyzer:
                     return self.torch.device(device)
         return self.model.device
 
-    def generate_text(self, prompt_text: str) -> str:
+    def _generate(self, prompt_text: str) -> str:
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
         device = self._input_device()
         inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -342,11 +220,11 @@ class MovieQueryAnalyzer:
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=eos_ids,
             )
-        generated_ids = output_ids[0][inputs["input_ids"].shape[-1]:]
+        generated_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
     @staticmethod
-    def extract_json_payload(text: str) -> str:
+    def _extract_json_payload(text: str) -> str:
         cleaned = str(text).strip().replace("```json", "").replace("```", "").strip()
         if "</think>" in cleaned:
             cleaned = cleaned.split("</think>", 1)[-1].strip()
@@ -356,102 +234,84 @@ class MovieQueryAnalyzer:
             return cleaned[start:end + 1].strip()
         return cleaned
 
-    @staticmethod
-    def _as_list(value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return [str(x).strip() for x in value if str(x).strip()]
-        if isinstance(value, str):
-            return [value.strip()] if value.strip() else []
-        value = str(value).strip()
-        return [value] if value else []
+    def _run_json_prompt(self, system_prompt: str, user_text: str) -> dict[str, Any]:
+        prompt = self._build_prompt(system_prompt, user_text)
+        raw_output = self._generate(prompt)
+        json_text = self._extract_json_payload(raw_output)
+        return json.loads(json_text)
 
     @staticmethod
-    def _as_str(value: Any) -> str:
-        return "" if value is None else str(value).strip()
-
-    def normalize_stage(self, stage: Any) -> Optional[dict[str, Any]]:
+    def _normalize_stage_item(stage: Any) -> dict[str, str] | None:
         if not isinstance(stage, dict):
             return None
-        metadata = stage.get("metadata", {})
-        if not isinstance(metadata, dict):
-            metadata = {**self.empty_metadata(), "other": self._as_list(metadata)}
-        else:
-            metadata = {
-                "character_names": self._as_list(metadata.get("character_names", [])),
-                "actor_names": self._as_list(metadata.get("actor_names", [])),
-                "movie_title": self._as_str(metadata.get("movie_title", "")),
-                "location": self._as_str(metadata.get("location", "")),
-                "organization": self._as_str(metadata.get("organization", "")),
-                "genre": self._as_str(metadata.get("genre", "")),
-                "country": self._as_str(metadata.get("country", "")),
-                "time_period": self._as_str(metadata.get("time_period", "")),
-                "other": self._as_list(metadata.get("other", [])),
-            }
-        normalized = {
-            "visual": self._as_str(stage.get("visual", stage.get("text", ""))),
-            "dialogue": self._as_str(stage.get("dialogue", stage.get("subtitle", ""))),
-            "ocr": self._as_str(stage.get("ocr", "")),
-            "metadata": metadata,
+        visual = str(stage.get("visual", "")).strip()
+        ocr = str(stage.get("ocr", "")).strip()
+        subtitle = str(stage.get("subtitle", stage.get("dialogue", ""))).strip()
+        if not any([visual, ocr, subtitle]):
+            return None
+        return {
+            "visual": visual,
+            "ocr": ocr,
+            "subtitle": subtitle,
         }
-        has_main_content = any(normalized[k] for k in ["visual", "dialogue", "ocr"])
-        has_metadata = any(
-            bool(v) if isinstance(v, list) else bool(str(v).strip())
-            for v in metadata.values()
-        )
-        if not (has_main_content or has_metadata):
-            return None
-        return normalized
 
-    def normalize_result(self, parsed: Any) -> Optional[dict[str, Any]]:
-        if isinstance(parsed, dict) and isinstance(parsed.get("stages"), list):
-            stages = parsed["stages"]
-        elif isinstance(parsed, dict) and isinstance(parsed.get("states"), list):
-            stages = parsed["states"]
-        elif isinstance(parsed, list):
-            stages = parsed
-        elif isinstance(parsed, dict):
-            stages = [parsed]
-        else:
-            return None
-        normalized_stages = []
+    @staticmethod
+    def _merge_adjacent_duplicate_stages(stages: list[dict[str, str]]) -> list[dict[str, str]]:
+        if not stages:
+            return []
+        merged = [dict(stages[0])]
+        for stage in stages[1:]:
+            prev = merged[-1]
+            if stage == prev:
+                continue
+            if (
+                stage.get("visual", "") == prev.get("visual", "")
+                and stage.get("ocr", "") == prev.get("ocr", "")
+                and stage.get("subtitle", "")
+                and prev.get("subtitle", "")
+                and stage.get("subtitle", "") == prev.get("subtitle", "")
+            ):
+                prev["subtitle"] = f"{prev['subtitle']}, {stage['subtitle']}"
+                continue
+            merged.append(dict(stage))
+        return merged
+
+    def translate_query(self, vi_query: str) -> str:
+        result = self._run_json_prompt(self.translation_system_prompt, vi_query)
+        return str(result.get("en_query", "")).strip()
+
+    def analyze_stages(self, vi_query: str) -> list[dict[str, str]]:
+        result = self._run_json_prompt(self.stage_system_prompt, vi_query)
+        stages = result.get("stages", [])
+        if not isinstance(stages, list):
+            raise ValueError("Model output does not contain a valid stages list.")
+        normalized = []
         for stage in stages:
-            normalized = self.normalize_stage(stage)
-            if normalized is not None:
-                normalized_stages.append(normalized)
-        if not normalized_stages:
-            return None
-        return {"stages": normalized_stages}
+            item = self._normalize_stage_item(stage)
+            if item is not None:
+                normalized.append(item)
+        return self._merge_adjacent_duplicate_stages(normalized)
 
-    def analyze(self, query: str, return_raw: bool = False) -> Optional[dict[str, Any]]:
+    def analyze(self, query: str, return_raw: bool = False) -> dict[str, Any] | None:
         try:
-            prompt_text = self.build_prompt(query)
-            raw_output = self.generate_text(prompt_text)
-            json_text = self.extract_json_payload(raw_output)
-            parsed = json.loads(json_text)
-            result = self.normalize_result(parsed)
-            if result is None:
-                raise ValueError("Model returned no usable stage.")
+            result = {
+                "en_query": self.translate_query(query),
+                "stages": self.analyze_stages(query),
+            }
             if return_raw:
-                result["_raw_output"] = raw_output
+                result["_raw_output"] = None
             return result
         except Exception as exc:
             print(f"⚠️ Query analysis failed: {exc}")
             return None
 
     def to_search_queries(self, analyzed: dict[str, Any]) -> list[dict[str, str]]:
-        normalized = self.normalize_result(analyzed)
-        if not normalized:
+        stages = analyzed.get("stages", []) if isinstance(analyzed, dict) else []
+        if not isinstance(stages, list):
             return []
-        search_queries = []
-        for stage in normalized["stages"]:
-            query = {
-                "text": stage.get("visual", "").strip(),
-                "subtitle": stage.get("dialogue", "").strip(),
-                "ocr": stage.get("ocr", "").strip(),
-            }
-            query = {k: v for k, v in query.items() if v}
-            if query:
-                search_queries.append(query)
-        return search_queries
+        normalized: list[dict[str, str]] = []
+        for stage in stages:
+            item = self._normalize_stage_item(stage)
+            if item is not None:
+                normalized.append(item)
+        return normalized
