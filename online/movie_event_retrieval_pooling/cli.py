@@ -8,6 +8,22 @@ from .common import load_json, save_json
 from .config import BuildConfig, SearchConfig
 
 
+def _select_query_items(payload: list[Any], *, start_index: int | None, end_index: int | None) -> list[tuple[int, dict[str, Any]]]:
+    indexed_items: list[tuple[int, dict[str, Any]]] = [
+        (idx, item) for idx, item in enumerate(payload) if isinstance(item, dict)
+    ]
+    if start_index is None and end_index is None:
+        return indexed_items
+
+    start = 0 if start_index is None else int(start_index)
+    end = (len(payload) - 1) if end_index is None else int(end_index)
+    if start < 0 or end < 0:
+        raise ValueError("start_index and end_index must be >= 0")
+    if end < start:
+        raise ValueError("end_index must be >= start_index")
+    return [(idx, item) for idx, item in indexed_items if start <= idx <= end]
+
+
 def _format_timecode(seconds: float) -> str:
     total_seconds = max(float(seconds), 0.0)
     hours = int(total_seconds // 3600)
@@ -190,15 +206,22 @@ def _run_pooling_batch_search(args) -> dict[str, Any]:
     payload = load_json(args.queries_json)
     if not isinstance(payload, list):
         raise ValueError("queries_json must contain a list of query objects")
+    selected_items = _select_query_items(
+        payload,
+        start_index=args.start_index,
+        end_index=args.end_index,
+    )
 
     results: list[dict[str, Any]] = []
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict):
-            continue
+    total_selected = len(selected_items)
+    for order, (index, item) in enumerate(selected_items, start=1):
         raw_query = str(item.get("query", "")).strip()
         if not raw_query:
             continue
-        print(f"[{index + 1}/{len(payload)}] Searching pooling query for video_id={item.get('video_id', '')}")
+        print(
+            f"[{order}/{total_selected}] Searching pooling query "
+            f"(query_index={index}, video_id={item.get('video_id', '')})"
+        )
         result = retriever.search(_build_search_config_from_args(args, raw_query=raw_query, output_json=None))
         results.append(
             _summarize_pooling_batch_result(
@@ -304,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
     search_batch = subparsers.add_parser("search-batch")
     search_batch.add_argument("--store_dir", type=Path, required=True)
     search_batch.add_argument("--queries_json", type=Path, required=True)
+    search_batch.add_argument("--start_index", type=int, default=None)
+    search_batch.add_argument("--end_index", type=int, default=None)
     search_batch.add_argument("--translated_query", type=str, default="")
     search_batch.add_argument("--subtitle_query", type=str, default="")
     search_batch.add_argument("--ocr_query", type=str, default="")
