@@ -302,7 +302,7 @@ class MovieQueryAnalyzer:
                 result["_raw_output"] = None
             return result
         except Exception as exc:
-            print(f"⚠️ Query analysis failed: {exc}")
+            print(f"[WARNING] Query analysis failed: {exc}")
             return None
 
     def to_search_queries(self, analyzed: dict[str, Any]) -> list[dict[str, str]]:

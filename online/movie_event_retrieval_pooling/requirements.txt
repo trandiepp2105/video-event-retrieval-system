@@ -1,8 +1,11 @@
 faiss-cpu
+fastapi
 meilisearch
 numpy
 open_clip_torch
+pyngrok
 rapidfuzz
 sentence-transformers
 torch
 tqdm
+uvicorn[standard]

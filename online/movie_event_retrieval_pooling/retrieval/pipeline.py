@@ -50,6 +50,38 @@ class PoolingMovieEventRetriever:
         self._text_searcher_cache: dict[tuple[Any, ...], tuple[OCRSearcher, SubtitleSearcher | None]] = {}
         self._temporal_query_analyzer_cache: dict[tuple[Any, ...], SoftTemporalShotQueryAnalyzer] = {}
 
+    def load_resources(self, config: SearchConfig) -> dict[str, Any]:
+        if config.clip_model_path is None:
+            raise ValueError("clip_model_path is required to load visual search resources")
+        if config.caption_model_path is None:
+            raise ValueError("caption_model_path is required to load caption search resources")
+
+        self._get_visual_encoder(config)
+        self._get_caption_encoder(config)
+        if config.subtitle_backend == "embedding":
+            self._get_subtitle_encoder(config)
+
+        ocr_searcher, subtitle_searcher = self._build_text_searchers(config)
+        ocr_searcher.client.get_index(ocr_searcher.index_uid)
+        if subtitle_searcher is not None:
+            subtitle_searcher.client.get_index(subtitle_searcher.index_uid)
+
+        if config.enable_shot_temporal:
+            self._get_temporal_query_analyzer(config)
+
+        return {
+            "videos": len(self.metadata.videos),
+            "events": len(self.metadata.events),
+            "shots": len(self.metadata.shots),
+            "subtitles": len(self.metadata.subtitles),
+            "ocr_items": len(self.metadata.ocr_items),
+            "event_vectors": int(self.event_index.ntotal),
+            "caption_vectors": int(self.caption_index.ntotal),
+            "shot_vectors": int(self.shot_index.ntotal),
+            "subtitle_vectors": int(self.subtitle_index.ntotal),
+            "shot_temporal_enabled": bool(config.enable_shot_temporal),
+        }
+
     def search(self, config: SearchConfig) -> dict[str, Any]:
         query = self._load_query(config)
         visual_encoder: OpenClipQueryEncoder | None = None
@@ -242,8 +274,11 @@ class PoolingMovieEventRetriever:
             return None
         if config.subtitle_backend == "meilisearch":
             return None
+        return self._get_subtitle_encoder(config)
+
+    def _get_subtitle_encoder(self, config: SearchConfig) -> SentenceTransformerQueryEncoder:
         if config.subtitle_model_path is None:
-            raise ValueError("subtitle_model_path is required when subtitle_backend=embedding and subtitle_query is provided")
+            raise ValueError("subtitle_model_path is required when subtitle_backend=embedding")
         cache_key = (
             str(config.subtitle_model_path),
             str(config.subtitle_device),
