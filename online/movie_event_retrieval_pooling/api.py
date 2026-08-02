@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from time import perf_counter
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -56,11 +57,28 @@ def create_app(config: SearchConfig) -> FastAPI:
     @app.post("/search", response_model=list[SegmentResponse])
     def search(payload: SearchRequest, request: Request) -> list[dict[str, str | float]]:
         retrieval_service: PoolingRetrievalService = request.app.state.retrieval_service
+        started_at = perf_counter()
+        status = "failed"
+        result_count = 0
+        print(
+            f"[API] Search started | top_k={payload.top_k} | query={payload.query}",
+            flush=True,
+        )
         try:
-            return retrieval_service.search(payload.query, top_k=payload.top_k)
+            results = retrieval_service.search(payload.query, top_k=payload.top_k)
+            result_count = len(results)
+            status = "completed"
+            return results
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+        finally:
+            elapsed_sec = perf_counter() - started_at
+            print(
+                f"[API] Search {status} | results={result_count} | "
+                f"server_search_time_sec={elapsed_sec:.3f}",
+                flush=True,
+            )
 
     return app
