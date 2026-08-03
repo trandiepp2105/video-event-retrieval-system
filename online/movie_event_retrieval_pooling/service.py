@@ -50,6 +50,15 @@ class PoolingRetrievalService:
             return dict(summary)
 
     def search(self, query: str, *, top_k: int = 10) -> list[dict[str, str | float]]:
+        results, _metrics = self.search_with_metrics(query, top_k=top_k)
+        return results
+
+    def search_with_metrics(
+        self,
+        query: str,
+        *,
+        top_k: int = 10,
+    ) -> tuple[list[dict[str, str | float]], dict[str, float]]:
         query = str(query).strip()
         if not query:
             raise ValueError("query must not be empty")
@@ -71,7 +80,13 @@ class PoolingRetrievalService:
         )
         with self._search_lock:
             payload = self._retriever.search(request_config)
-        return [item.to_dict() for item in self._extract_segments(payload, top_k=int(top_k))]
+        results = [item.to_dict() for item in self._extract_segments(payload, top_k=int(top_k))]
+        metrics = {
+            "query_analyzer_time_sec": float(
+                payload.get("shot_temporal", {}).get("query_analyzer_time_sec", 0.0)
+            ),
+        }
+        return results, metrics
 
     @staticmethod
     def _extract_segments(payload: dict[str, Any], *, top_k: int) -> list[SegmentResult]:

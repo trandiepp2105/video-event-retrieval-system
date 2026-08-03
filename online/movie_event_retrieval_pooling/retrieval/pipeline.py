@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from ..common import load_json, save_json
@@ -142,7 +143,13 @@ class PoolingMovieEventRetriever:
             top_event_candidates = self._format_event_candidates(ranked_events)
 
             shot_results: list[ShotResult] = []
-            temporal_payload: dict[str, Any] = {"enabled": bool(config.enable_shot_temporal), "query_analysis": None, "stage_results": [], "top_chains": []}
+            temporal_payload: dict[str, Any] = {
+                "enabled": bool(config.enable_shot_temporal),
+                "query_analysis": None,
+                "query_analyzer_time_sec": 0.0,
+                "stage_results": [],
+                "top_chains": [],
+            }
             if shot_query_vector is not None and candidate_event_ids:
                 candidate_shot_ids = ShotCandidateBuilder(self.mappings).build(
                     event_ids=candidate_event_ids,
@@ -418,14 +425,28 @@ class PoolingMovieEventRetriever:
         ocr_searcher: OCRSearcher,
     ) -> dict[str, Any]:
         analyzer = self._get_temporal_query_analyzer(config)
+        analyzer_started_at = perf_counter()
         analyzed = analyzer.analyze(raw_query)
+        query_analyzer_time_sec = perf_counter() - analyzer_started_at
         if not analyzed:
-            return {"enabled": True, "query_analysis": None, "stage_results": [], "top_chains": []}
+            return {
+                "enabled": True,
+                "query_analysis": None,
+                "query_analyzer_time_sec": query_analyzer_time_sec,
+                "stage_results": [],
+                "top_chains": [],
+            }
 
         stages = [StageQuery.from_dict(item) for item in analyzed.get("stages", [])]
         stages = [stage for stage in stages if not stage.is_empty()]
         if not stages:
-            return {"enabled": True, "query_analysis": analyzed, "stage_results": [], "top_chains": []}
+            return {
+                "enabled": True,
+                "query_analysis": analyzed,
+                "query_analyzer_time_sec": query_analyzer_time_sec,
+                "stage_results": [],
+                "top_chains": [],
+            }
 
         allowed_shot_ids = set(candidate_shot_ids)
         allowed_faiss_ids = self.mappings.shot_mapping.faiss_ids_from_item_ids(candidate_shot_ids)
@@ -488,6 +509,7 @@ class PoolingMovieEventRetriever:
         return {
             "enabled": True,
             "query_analysis": analyzed,
+            "query_analyzer_time_sec": query_analyzer_time_sec,
             "stage_results": [
                 {
                     "stage_index": stage_index,

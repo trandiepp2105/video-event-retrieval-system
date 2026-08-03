@@ -60,13 +60,14 @@ def create_app(config: SearchConfig) -> FastAPI:
         started_at = perf_counter()
         status = "failed"
         result_count = 0
-        print(
-            f"[API] Search started | top_k={payload.top_k} | query={payload.query}",
-            flush=True,
-        )
+        query_analyzer_time_sec = 0.0
         try:
-            results = retrieval_service.search(payload.query, top_k=payload.top_k)
+            results, metrics = retrieval_service.search_with_metrics(
+                payload.query,
+                top_k=payload.top_k,
+            )
             result_count = len(results)
+            query_analyzer_time_sec = metrics["query_analyzer_time_sec"]
             status = "completed"
             return results
         except ValueError as error:
@@ -77,7 +78,8 @@ def create_app(config: SearchConfig) -> FastAPI:
             elapsed_sec = perf_counter() - started_at
             print(
                 f"[API] Search {status} | results={result_count} | "
-                f"server_search_time_sec={elapsed_sec:.3f}",
+                f"server_search_time_sec={elapsed_sec:.3f} | "
+                f"query_analyzer_time_sec={query_analyzer_time_sec:.3f}",
                 flush=True,
             )
 

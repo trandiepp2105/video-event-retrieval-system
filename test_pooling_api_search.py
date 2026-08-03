@@ -6,7 +6,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-SEARCH_URL = "https://a519-34-74-184-193.ngrok-free.app/search"
+SEARCH_URL = "https://1c32-136-116-79-22.ngrok-free.app/search"
 QUERY = (
     "Hai người mang các hộp có chữ CAKE tới cổng khu doanh trại, "
     "trình giấy tờ với lính gác rồi được cho phép đi vào"
