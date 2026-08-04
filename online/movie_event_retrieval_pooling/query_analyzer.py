@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -116,16 +117,29 @@ Output:
 """
 
 
-DEFAULT_SYSTEM_PROMPT = STAGE_SYSTEM_PROMPT
+@dataclass(frozen=True)
+class StageQuery:
+    visual: str = ""
+    ocr: str = ""
+    subtitle: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "StageQuery":
+        return cls(
+            visual=str(payload.get("visual", "")).strip(),
+            ocr=str(payload.get("ocr", "")).strip(),
+            subtitle=str(payload.get("subtitle", "")).strip(),
+        )
+
+    def is_empty(self) -> bool:
+        return not (self.visual or self.ocr or self.subtitle)
 
 
-class MovieQueryAnalyzer:
+class SoftTemporalShotQueryAnalyzer:
     def __init__(
         self,
         model_id: str,
         *,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        translation_system_prompt: str = TRANSLATION_SYSTEM_PROMPT,
         torch_dtype: str = "auto",
         device_map: str = "auto",
         max_new_tokens: int = 768,
@@ -138,8 +152,8 @@ class MovieQueryAnalyzer:
 
         self.torch = torch
         self.model_id = model_id
-        self.stage_system_prompt = system_prompt
-        self.translation_system_prompt = translation_system_prompt
+        self.torch_dtype = torch_dtype
+        self.device_map = device_map
         self.max_new_tokens = int(max_new_tokens)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
         self.tokenizer.padding_side = "left"
@@ -155,14 +169,23 @@ class MovieQueryAnalyzer:
                 llm_int8_enable_fp32_cpu_offload=bnb_8bit_cpu_offload,
             )
 
-        model_kwargs = {"device_map": device_map, "trust_remote_code": True}
+        model_kwargs: dict[str, Any] = {"device_map": self.device_map, "trust_remote_code": True}
         if quantization_config is not None:
             model_kwargs["quantization_config"] = quantization_config
         else:
-            model_kwargs["torch_dtype"] = torch_dtype
+            model_kwargs["torch_dtype"] = self.torch_dtype
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model_id, **model_kwargs)
         self.model.eval()
+
+    def _input_device(self):
+        if hasattr(self.model, "hf_device_map"):
+            for device in self.model.hf_device_map.values():
+                if isinstance(device, int):
+                    return self.torch.device(f"cuda:{device}")
+                if isinstance(device, str) and device not in {"cpu", "disk"}:
+                    return self.torch.device(device)
+        return self.model.device
 
     def _build_prompt(self, system_prompt: str, user_text: str) -> str:
         messages = [
@@ -191,15 +214,6 @@ class MovieQueryAnalyzer:
             text += f"{str(msg['role']).upper()}:\n{str(msg['content'])}\n\n"
         text += "ASSISTANT:\n"
         return text
-
-    def _input_device(self):
-        if hasattr(self.model, "hf_device_map"):
-            for device in self.model.hf_device_map.values():
-                if isinstance(device, int):
-                    return self.torch.device(f"cuda:{device}")
-                if isinstance(device, str) and device not in {"cpu", "disk"}:
-                    return self.torch.device(device)
-        return self.model.device
 
     def _generate(self, prompt_text: str) -> str:
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
@@ -231,7 +245,7 @@ class MovieQueryAnalyzer:
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return cleaned[start:end + 1].strip()
+            return cleaned[start : end + 1].strip()
         return cleaned
 
     def _run_json_prompt(self, system_prompt: str, user_text: str) -> dict[str, Any]:
@@ -255,6 +269,22 @@ class MovieQueryAnalyzer:
             "subtitle": subtitle,
         }
 
+    def translate_query(self, vi_query: str) -> str:
+        result = self._run_json_prompt(TRANSLATION_SYSTEM_PROMPT, vi_query)
+        return str(result.get("en_query", "")).strip()
+
+    def analyze_stages(self, vi_query: str) -> list[dict[str, str]]:
+        result = self._run_json_prompt(STAGE_SYSTEM_PROMPT, vi_query)
+        stages = result.get("stages", [])
+        if not isinstance(stages, list):
+            raise ValueError("Model output does not contain a valid stages list.")
+        normalized = []
+        for stage in stages:
+            item = self._normalize_stage_item(stage)
+            if item is not None:
+                normalized.append(item)
+        return self._merge_adjacent_duplicate_stages(normalized)
+
     @staticmethod
     def _merge_adjacent_duplicate_stages(stages: list[dict[str, str]]) -> list[dict[str, str]]:
         if not stages:
@@ -276,42 +306,13 @@ class MovieQueryAnalyzer:
             merged.append(dict(stage))
         return merged
 
-    def translate_query(self, vi_query: str) -> str:
-        result = self._run_json_prompt(self.translation_system_prompt, vi_query)
-        return str(result.get("en_query", "")).strip()
-
-    def analyze_stages(self, vi_query: str) -> list[dict[str, str]]:
-        result = self._run_json_prompt(self.stage_system_prompt, vi_query)
-        stages = result.get("stages", [])
-        if not isinstance(stages, list):
-            raise ValueError("Model output does not contain a valid stages list.")
-        normalized = []
-        for stage in stages:
-            item = self._normalize_stage_item(stage)
-            if item is not None:
-                normalized.append(item)
-        return self._merge_adjacent_duplicate_stages(normalized)
-
-    def analyze(self, query: str, return_raw: bool = False) -> dict[str, Any] | None:
-        try:
-            result = {
-                "en_query": self.translate_query(query),
-                "stages": self.analyze_stages(query),
-            }
-            if return_raw:
-                result["_raw_output"] = None
-            return result
-        except Exception as exc:
-            print(f"[WARNING] Query analysis failed: {exc}")
-            return None
-
-    def to_search_queries(self, analyzed: dict[str, Any]) -> list[dict[str, str]]:
-        stages = analyzed.get("stages", []) if isinstance(analyzed, dict) else []
-        if not isinstance(stages, list):
-            return []
-        normalized: list[dict[str, str]] = []
-        for stage in stages:
-            item = self._normalize_stage_item(stage)
-            if item is not None:
-                normalized.append(item)
-        return normalized
+    def analyze(self, vi_query: str, return_raw: bool = False) -> dict[str, Any]:
+        en_query = self.translate_query(vi_query)
+        stages = self.analyze_stages(vi_query)
+        result: dict[str, Any] = {
+            "en_query": en_query,
+            "stages": stages,
+        }
+        if return_raw:
+            result["_raw_output"] = None
+        return result
