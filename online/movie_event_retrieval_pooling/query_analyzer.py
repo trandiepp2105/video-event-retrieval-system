@@ -119,7 +119,7 @@ Output:
 DEFAULT_SYSTEM_PROMPT = STAGE_SYSTEM_PROMPT
 
 
-class MovieQueryAnalyzer:
+class SoftTemporalShotQueryAnalyzer:
     def __init__(
         self,
         model_id: str,
