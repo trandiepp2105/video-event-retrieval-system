@@ -6,13 +6,13 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-SEARCH_URL = "https://d4a2-34-178-6-37.ngrok-free.app/search"
+SEARCH_URL = "https://cf53-34-44-113-239.ngrok-free.app/search"
 QUERY = (
     "Hai người mang các hộp có chữ CAKE tới cổng khu doanh trại, "
     "trình giấy tờ với lính gác rồi được cho phép đi vào"
 )
 TOP_K = 10
-TIMEOUT_SEC = 600
+TIMEOUT_SEC = 60
 
 
 def main() -> None:

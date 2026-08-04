@@ -202,7 +202,7 @@ class PoolingMovieEventRetriever:
                 "candidates": {
                     "event_ids": candidate_event_ids,
                     "video_ids": candidate_video_ids,
-                    "top_events": top_event_candidates[:20],
+                    "top_events": top_event_candidates[:100],
                 },
                 "shot_level": {
                     "top_shots": [shot.__dict__ for shot in shot_results[:20]],
